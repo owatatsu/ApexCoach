@@ -1,0 +1,55 @@
+frequencies:
+  capture_fps: 10
+  ui_parse_fps: 10
+  ocr_fps: 2
+  state_fps: 10
+  decision_fps: 10
+  llm_fps: 1
+  overlay_fps: 10
+
+thresholds:
+  low_total_hp_shield: 0.45
+  heal_total_hp_shield: 0.65
+  push_min_total_hp_shield: 0.95
+  high_damage_1s: 0.35
+  high_damage_3s: 0.55
+  quiet_damage_1s: 0.05
+  ally_isolated_alive_count: 1
+  knock_recent_seconds: 2.5
+  under_fire_damage_1s: 0.03
+
+arbiter:
+  same_action_cooldown_seconds: 2.0
+  retreat_hold_seconds: 1.2
+  push_block_after_retreat_seconds: 3.0
+
+overlay:
+  enabled: true
+  show_window: false
+  show_reason: true
+  window_name: "ApexCoach"
+  position: "right_center"   # right_center | left_top | custom
+  margin_x: 36
+  offset_y: 0
+  panel_width: 540
+  text_x: 36
+  text_y: 54
+
+offline:
+  input_video: ""
+  output_video: ""
+  telemetry_jsonl: ""
+
+logging:
+  enabled: true
+  path: "logs/session.jsonl"
+  include_reason: true
+
+llm:
+  enabled: false
+
+rois:
+  hp_bar: [136, 991, 294, 22]
+  shield_bar: [136, 967, 294, 22]
+  teammate_panel: [1650, 850, 240, 210]
+  kill_feed: [1490, 120, 390, 220]
