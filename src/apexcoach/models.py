@@ -12,6 +12,8 @@ class Action(str, Enum):
     NONE = "NONE"
     HEAL = "HEAL"
     RETREAT = "RETREAT"
+    TAKE_COVER = "TAKE_COVER"
+    TAKE_HIGH_GROUND = "TAKE_HIGH_GROUND"
     PUSH = "PUSH"
 
 
@@ -26,8 +28,20 @@ class FramePacket:
 class ParsedStatus:
     hp_pct: float | None = None
     shield_pct: float | None = None
+    hp_confidence: float = 0.0
+    shield_confidence: float = 0.0
     allies_alive: int | None = None
     allies_down: int | None = None
+
+
+@dataclass(slots=True)
+class ParsedTactical:
+    low_ground_disadvantage: bool | None = None
+    low_ground_confidence: float = 0.0
+    exposed_no_cover: bool | None = None
+    exposed_confidence: float = 0.0
+    is_moving: bool | None = None
+    movement_score: float = 0.0
 
 
 @dataclass(slots=True)
@@ -49,6 +63,13 @@ class GameState:
     timestamp: float
     hp_pct: float = 1.0
     shield_pct: float = 1.0
+    vitals_confidence: float = 1.0
+    retreat_low_hp_streak: int = 0
+    heal_low_hp_streak: int = 0
+    is_moving: bool = False
+    movement_score: float = 0.0
+    moving_recent_frames: int = 0
+    stationary_frames: int = 0
     allies_alive: int = 3
     allies_down: int = 0
     recent_damage_1s: float = 0.0
@@ -56,6 +77,10 @@ class GameState:
     under_fire: bool = False
     enemy_knock_recent: bool = False
     ally_knock_recent: bool = False
+    low_ground_disadvantage: bool = False
+    low_ground_confidence: float = 0.0
+    exposed_no_cover: bool = False
+    exposed_confidence: float = 0.0
     last_action: Action = Action.NONE
     last_action_time: float | None = None
 

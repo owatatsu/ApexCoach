@@ -37,10 +37,18 @@ class ThresholdConfig:
     push_min_total_hp_shield: float = 0.95
     high_damage_1s: float = 0.35
     high_damage_3s: float = 0.55
+    min_damage_event_delta: float = 0.04
     quiet_damage_1s: float = 0.05
     ally_isolated_alive_count: int = 1
     knock_recent_seconds: float = 2.5
     under_fire_damage_1s: float = 0.03
+    vitals_confidence_min: float = 0.3
+    low_hp_consecutive_frames: int = 3
+    heal_stationary_frames: int = 4
+    retreat_lowhp_stationary_frames: int = 3
+    movement_score_threshold: float = 0.045
+    low_ground_confidence_min: float = 0.65
+    exposed_confidence_min: float = 0.65
 
 
 @dataclass(slots=True)
@@ -56,6 +64,14 @@ class OverlayConfig:
     show_window: bool = False
     show_reason: bool = True
     window_name: str = "ApexCoach"
+    window_mode: str = "hud"  # hud | frame
+    window_click_through: bool = True
+    window_transparent: bool = True
+    window_always_on_top: bool = True
+    display_hold_seconds: float = 3.0
+    max_lines: int = 3
+    text_scale: float = 0.85
+    background_alpha: float = 0.5
     position: str = "right_center"
     margin_x: int = 36
     offset_y: int = 0
@@ -72,6 +88,16 @@ class OfflineConfig:
 
 
 @dataclass(slots=True)
+class RealtimeConfig:
+    monitor_index: int = 1
+    region_x: int = 0
+    region_y: int = 0
+    region_w: int = 0
+    region_h: int = 0
+    duration_seconds: float = 0.0
+
+
+@dataclass(slots=True)
 class LoggingConfig:
     enabled: bool = True
     path: str = "logs/session.jsonl"
@@ -83,10 +109,19 @@ class LlmConfig:
     enabled: bool = False
 
 
+@dataclass(slots=True)
+class PerformanceConfig:
+    parallel_io: bool = True
+    read_prefetch_queue_size: int = 64
+    write_queue_size: int = 64
+    opencv_threads: int = 0
+
+
 def default_rois() -> dict[str, Roi]:
     return {
-        "hp_bar": Roi(136, 991, 294, 22),
-        "shield_bar": Roi(136, 967, 294, 22),
+        # Baseline for 1920x1080, bottom-left player HUD.
+        "hp_bar": Roi(44, 993, 420, 26),
+        "shield_bar": Roi(44, 967, 420, 24),
         "teammate_panel": Roi(1650, 850, 240, 210),
         "kill_feed": Roi(1490, 120, 390, 220),
     }
@@ -99,9 +134,14 @@ class ApexCoachConfig:
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     offline: OfflineConfig = field(default_factory=OfflineConfig)
+    realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     rois: dict[str, Roi] = field(default_factory=default_rois)
+    scale_rois_to_frame: bool = True
+    roi_reference_width: int = 1920
+    roi_reference_height: int = 1080
 
 
 def load_config(path: str | Path | None) -> ApexCoachConfig:

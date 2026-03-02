@@ -13,10 +13,18 @@ thresholds:
   push_min_total_hp_shield: 0.95
   high_damage_1s: 0.35
   high_damage_3s: 0.55
+  min_damage_event_delta: 0.04
   quiet_damage_1s: 0.05
   ally_isolated_alive_count: 1
   knock_recent_seconds: 2.5
   under_fire_damage_1s: 0.03
+  vitals_confidence_min: 0.3
+  low_hp_consecutive_frames: 4
+  heal_stationary_frames: 4
+  retreat_lowhp_stationary_frames: 3
+  movement_score_threshold: 0.045
+  low_ground_confidence_min: 0.65
+  exposed_confidence_min: 0.65
 
 arbiter:
   same_action_cooldown_seconds: 2.0
@@ -28,6 +36,14 @@ overlay:
   show_window: false
   show_reason: true
   window_name: "ApexCoach"
+  window_mode: "hud"         # hud | frame
+  window_click_through: true
+  window_transparent: true
+  window_always_on_top: true
+  display_hold_seconds: 3.0
+  max_lines: 3
+  text_scale: 0.85
+  background_alpha: 0.6
   position: "right_center"   # right_center | left_top | custom
   margin_x: 36
   offset_y: 0
@@ -40,6 +56,14 @@ offline:
   output_video: ""
   telemetry_jsonl: ""
 
+realtime:
+  monitor_index: 1
+  region_x: 0
+  region_y: 0
+  region_w: 0
+  region_h: 0
+  duration_seconds: 0
+
 logging:
   enabled: true
   path: "logs/session.jsonl"
@@ -48,8 +72,19 @@ logging:
 llm:
   enabled: false
 
+performance:
+  parallel_io: true
+  read_prefetch_queue_size: 64
+  write_queue_size: 64
+  opencv_threads: 0
+
 rois:
-  hp_bar: [136, 991, 294, 22]
-  shield_bar: [136, 967, 294, 22]
+  hp_bar: [44, 993, 420, 26]
+  shield_bar: [44, 967, 420, 24]
   teammate_panel: [1650, 850, 240, 210]
   kill_feed: [1490, 120, 390, 220]
+
+# ROI calibration
+scale_rois_to_frame: true
+roi_reference_width: 1920
+roi_reference_height: 1080
