@@ -46,6 +46,51 @@ apexcoach ^
   --output-video output/overlay.mp4
 ```
 
+## Offline Local LLM Coaching (LM Studio)
+
+LM Studio local server example:
+
+```bash
+# Start Local Server in LM Studio
+# API endpoint: http://127.0.0.1:1234
+# Model: qwen2.5-14b-instruct-q4_k_m.gguf
+```
+
+Enable in config:
+
+```yaml
+llm:
+  enabled: true
+  provider: "lmstudio"
+  model: "qwen2.5-14b-instruct-q4_k_m.gguf"
+  base_url: "http://127.0.0.1:1234"
+  api_key: "lm-studio"
+  lmstudio_response_format: "json_schema"
+  num_ctx: 4096
+  offline_review_max_events: 16
+  offline_review_prompt_max_chars: 12000
+  offline_review_enabled: true
+  offline_review_output: "logs/coach_review.md"
+```
+
+Then run normal offline pipeline. After processing, a markdown review is saved to
+`logs/coach_review.md`.
+
+CLI override example:
+
+```bash
+apexcoach ^
+  --video path/to/apex_recording.mp4 ^
+  --config config/apexcoach.example.yaml ^
+  --llm-enable ^
+  --llm-provider lmstudio ^
+  --llm-model qwen2.5-14b-instruct-q4_k_m.gguf ^
+  --llm-base-url http://127.0.0.1:1234 ^
+  --llm-review-output logs/coach_review.md
+```
+
+Ollama can still be used by setting `llm.provider: "ollama"` and `llm.base_url: "http://127.0.0.1:11434"`.
+
 ## Optional Telemetry JSONL
 
 For faster rule tuning, you can inject UI state from JSONL per frame.
@@ -86,6 +131,11 @@ Recommended overlay settings:
 - `overlay.max_lines: 3`
 - `overlay.background_alpha: 0.5`
 - `overlay.text_scale: 0.85`
+
+Recommended local models:
+
+- Text coaching: `qwen2.5-14b-instruct-q4_k_m.gguf` (LM Studio)
+- Vision extension later: `qwen2.5vl:7b`
 
 ## Tests
 

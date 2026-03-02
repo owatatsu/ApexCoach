@@ -85,7 +85,7 @@ class OfflinePipeline:
         decision_engine = RuleDecisionEngine(self.config.thresholds)
         arbiter = ActionArbiter(self.config.arbiter)
         overlay = OverlayRenderer(self.config.overlay)
-        llm = LlmAdvisor(enabled=self.config.llm.enabled)
+        llm = LlmAdvisor(self.config.llm)
         logger = SessionLogger(
             path=self.config.logging.path,
             enabled=self.config.logging.enabled,
@@ -232,7 +232,7 @@ class OfflinePipeline:
                 "Transcode the input to H.264 (yuv420p) and retry."
             )
 
-        return {
+        summary = {
             "frames": frames,
             "NONE": action_counts.get("NONE", 0),
             "HEAL": action_counts.get("HEAL", 0),
@@ -241,6 +241,13 @@ class OfflinePipeline:
             "TAKE_HIGH_GROUND": action_counts.get("TAKE_HIGH_GROUND", 0),
             "PUSH": action_counts.get("PUSH", 0),
         }
+
+        llm.generate_offline_review(
+            session_log_path=self.config.logging.path,
+            summary=summary,
+        )
+
+        return summary
 
 
 class RealtimePipeline:
@@ -275,7 +282,7 @@ class RealtimePipeline:
         decision_engine = RuleDecisionEngine(self.config.thresholds)
         arbiter = ActionArbiter(self.config.arbiter)
         overlay = OverlayRenderer(self.config.overlay)
-        llm = LlmAdvisor(enabled=self.config.llm.enabled)
+        llm = LlmAdvisor(self.config.llm)
         logger = SessionLogger(
             path=self.config.logging.path,
             enabled=self.config.logging.enabled,

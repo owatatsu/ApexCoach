@@ -107,6 +107,22 @@ class LoggingConfig:
 @dataclass(slots=True)
 class LlmConfig:
     enabled: bool = False
+    provider: str = "lmstudio"
+    model: str = "qwen2.5-14b-instruct-q4_k_m.gguf"
+    base_url: str = "http://127.0.0.1:1234"
+    api_key: str = "lm-studio"
+    timeout_seconds: float = 45.0
+    temperature: float = 0.2
+    num_ctx: int = 4096
+    lmstudio_response_format: str = "json_schema"
+    llm_max_tokens: int = 500
+    frame_reasoning_enabled: bool = False
+    offline_review_enabled: bool = True
+    offline_review_output: str = "logs/coach_review.md"
+    offline_review_max_events: int = 16
+    offline_review_prompt_max_chars: int = 12000
+    offline_review_reason_max_chars: int = 96
+    offline_review_language: str = "ja"
 
 
 @dataclass(slots=True)

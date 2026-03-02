@@ -57,6 +57,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable overlay rendering",
     )
+    parser.add_argument(
+        "--llm-enable",
+        action="store_true",
+        help="Enable local LLM features (offline review).",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default=None,
+        help="Local LLM provider: lmstudio or ollama.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default=None,
+        help="Local LLM model name.",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        type=str,
+        default=None,
+        help="Local LLM API base URL (default: http://127.0.0.1:11434).",
+    )
+    parser.add_argument(
+        "--llm-review-output",
+        type=str,
+        default=None,
+        help="Output path for offline review markdown.",
+    )
     return parser
 
 
@@ -110,6 +139,16 @@ def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> N
         config.overlay.show_window = True
     if args.disable_overlay:
         config.overlay.enabled = False
+    if args.llm_enable:
+        config.llm.enabled = True
+    if args.llm_provider:
+        config.llm.provider = args.llm_provider
+    if args.llm_model:
+        config.llm.model = args.llm_model
+    if args.llm_base_url:
+        config.llm.base_url = args.llm_base_url
+    if args.llm_review_output:
+        config.llm.offline_review_output = args.llm_review_output
 
 
 def _validate_inputs(

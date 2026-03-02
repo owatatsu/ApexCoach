@@ -71,6 +71,22 @@ logging:
 
 llm:
   enabled: false
+  provider: "lmstudio" # lmstudio | ollama
+  model: "qwen2.5-14b-instruct-q4_k_m.gguf"
+  base_url: "http://127.0.0.1:1234"
+  api_key: "lm-studio"
+  timeout_seconds: 45
+  temperature: 0.2
+  num_ctx: 4096
+  lmstudio_response_format: "json_schema" # json_schema | text
+  llm_max_tokens: 500
+  frame_reasoning_enabled: false
+  offline_review_enabled: true
+  offline_review_output: "logs/coach_review.md"
+  offline_review_max_events: 16
+  offline_review_prompt_max_chars: 12000
+  offline_review_reason_max_chars: 96
+  offline_review_language: "ja"
 
 performance:
   parallel_io: true
