@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from apexcoach.config import OverlayConfig
 from apexcoach.models import Action
@@ -15,6 +16,22 @@ try:
 except ImportError:  # pragma: no cover - runtime dependency
     np = None
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover - runtime dependency
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+
+_PIL_FONT_CACHE: dict[int, object] = {}
+_PIL_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\YuGothM.ttc",
+    r"C:\Windows\Fonts\meiryo.ttc",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    r"C:\Windows\Fonts\YuGothR.ttc",
+]
+
 
 class OverlayRenderer:
     def __init__(self, config: OverlayConfig) -> None:
@@ -24,6 +41,8 @@ class OverlayRenderer:
         self._hud_style_applied = False
         self._active_lines: list[str] = []
         self._hold_until_ts: float = -1.0
+        self._active_llm_message: str | None = None
+        self._llm_hold_until_ts: float = -1.0
 
     def render(
         self,
@@ -33,6 +52,8 @@ class OverlayRenderer:
         *,
         timestamp: float | None = None,
         decision_lines: list[str] | None = None,
+        llm_message: str | None = None,
+        roi_boxes: dict[str, tuple[int, int, int, int]] | None = None,
     ) -> object:
         if not self.c.enabled or cv2 is None:
             return frame
@@ -40,16 +61,23 @@ class OverlayRenderer:
         out = frame.copy()
         frame_h, frame_w = out.shape[:2]
         lines = self._resolve_lines(action, reason, timestamp, decision_lines)
+        llm_line = self._resolve_llm_message(timestamp=timestamp, llm_message=llm_message)
+        draw_lines = list(lines)
+        if draw_lines and llm_line:
+            draw_lines.append(f"LLM | {llm_line}")
 
-        if lines:
-            out = _draw_lines_on_frame(out, self.c, lines)
+        if self.c.debug_show_rois and roi_boxes:
+            out = _draw_roi_debug_overlay(out, self.c, roi_boxes)
+
+        if draw_lines:
+            out = _draw_lines_on_frame(out, self.c, draw_lines)
 
         if self.c.show_window:
             if self.c.window_mode == "hud":
                 self._show_hud_window(
                     frame_w=frame_w,
                     frame_h=frame_h,
-                    lines=lines,
+                    lines=draw_lines,
                 )
             else:
                 self._show_frame_window(out)
@@ -158,6 +186,30 @@ class OverlayRenderer:
                 )
                 self._hud_style_applied = True
 
+    def _resolve_llm_message(
+        self,
+        *,
+        timestamp: float | None,
+        llm_message: str | None,
+    ) -> str | None:
+        hold_seconds = max(0.0, float(self.c.display_hold_seconds))
+        message = (llm_message or "").strip()
+
+        if message:
+            self._active_llm_message = message
+            if timestamp is not None:
+                self._llm_hold_until_ts = timestamp + hold_seconds
+            return message
+
+        if (
+            timestamp is not None
+            and self._active_llm_message
+            and timestamp <= self._llm_hold_until_ts
+        ):
+            return self._active_llm_message
+
+        return None
+
 
 def _draw_lines_on_frame(
     frame,
@@ -168,7 +220,7 @@ def _draw_lines_on_frame(
     panel_width: int | None = None,
     apply_alpha: bool = True,
 ):
-    if cv2 is None:
+    if cv2 is None or np is None:
         return frame
 
     out = frame.copy()
@@ -197,20 +249,141 @@ def _draw_lines_on_frame(
     else:
         cv2.rectangle(out, (x1, y1), (x2, y2), (18, 18, 18), -1)
 
+    if _needs_unicode_render(lines) and _can_render_with_pillow():
+        out = _draw_lines_with_pillow(
+            out=out,
+            lines=lines,
+            x=x,
+            y=y,
+            line_step=line_step,
+            text_scale=text_scale,
+        )
+    else:
+        for idx, line in enumerate(lines):
+            ty = y + (idx * line_step)
+            color = _line_color(line)
+            cv2.putText(
+                out,
+                line,
+                (x, ty),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.95 * text_scale,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+    return out
+
+
+def _draw_lines_with_pillow(
+    *,
+    out,
+    lines: list[str],
+    x: int,
+    y: int,
+    line_step: int,
+    text_scale: float,
+):
+    if cv2 is None or np is None or Image is None or ImageDraw is None:
+        return out
+
+    font_px = max(16, int(round(25 * text_scale)))
+    font = _load_pillow_font(font_px)
+    if font is None:
+        return out
+
+    rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(pil_img)
+    text_y_offset = int(font_px * 0.88)
     for idx, line in enumerate(lines):
         ty = y + (idx * line_step)
-        color = _line_color(line)
-        cv2.putText(
-            out,
+        py = ty - text_y_offset
+        bgr = _line_color(line)
+        rgb_color = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        draw.text(
+            (x, py),
             line,
-            (x, ty),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.95 * text_scale,
-            color,
-            2,
-            cv2.LINE_AA,
+            font=font,
+            fill=rgb_color,
+            stroke_width=1,
+            stroke_fill=(0, 0, 0),
         )
+
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
+def _draw_roi_debug_overlay(
+    frame,
+    config: OverlayConfig,
+    roi_boxes: dict[str, tuple[int, int, int, int]],
+):
+    if cv2 is None:
+        return frame
+
+    out = frame.copy()
+    overlay = out.copy()
+    alpha = max(0.05, min(0.95, float(config.debug_roi_alpha)))
+    palette = [
+        (255, 120, 80),   # BGR
+        (90, 210, 250),
+        (100, 220, 120),
+        (240, 180, 80),
+        (220, 110, 220),
+        (130, 220, 220),
+    ]
+
+    for idx, name in enumerate(sorted(roi_boxes.keys())):
+        x1, y1, x2, y2 = roi_boxes[name]
+        color = palette[idx % len(palette)]
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        if config.debug_show_roi_labels:
+            label_y = max(14, y1 - 6)
+            cv2.putText(
+                out,
+                name,
+                (x1 + 4, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+    out = cv2.addWeighted(overlay, alpha, out, 1.0 - alpha, 0)
     return out
+
+
+def _needs_unicode_render(lines: list[str]) -> bool:
+    for line in lines:
+        if any(ord(ch) > 127 for ch in line):
+            return True
+    return False
+
+
+def _can_render_with_pillow() -> bool:
+    return Image is not None and ImageDraw is not None and ImageFont is not None
+
+
+def _load_pillow_font(size_px: int):
+    if ImageFont is None:
+        return None
+
+    key = int(size_px)
+    cached = _PIL_FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    for path in _PIL_FONT_CANDIDATES:
+        try:
+            if Path(path).exists():
+                font = ImageFont.truetype(path, key)
+                _PIL_FONT_CACHE[key] = font
+                return font
+        except Exception:
+            continue
+    return None
 
 
 def _line_color(line: str) -> tuple[int, int, int]:
@@ -225,6 +398,8 @@ def _line_color(line: str) -> tuple[int, int, int]:
         return (80, 200, 120)
     if action_token == Action.PUSH.value:
         return (240, 180, 40)
+    if action_token == "LLM":
+        return (220, 220, 255)
     return (220, 220, 220)
 
 

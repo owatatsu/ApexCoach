@@ -50,6 +50,9 @@ overlay:
   panel_width: 540
   text_x: 36
   text_y: 54
+  debug_show_rois: false
+  debug_roi_alpha: 0.35
+  debug_show_roi_labels: true
 
 offline:
   input_video: ""
@@ -70,16 +73,29 @@ logging:
   include_reason: true
 
 llm:
-  enabled: false
-  provider: "lmstudio" # lmstudio | ollama
-  model: "qwen2.5-14b-instruct-q4_k_m.gguf"
-  base_url: "http://127.0.0.1:1234"
+  enabled: true
+  provider: "lmstudio"
+  model_name: "qwen3.5-9b"
+  base_url: "http://127.0.0.1:1234/v1"
+  timeout_ms: 1200
+  temperature: 0.1
+  llm_max_tokens: 64
+  min_request_interval_ms: 1000
   api_key: "lm-studio"
   timeout_seconds: 45
-  temperature: 0.2
   num_ctx: 4096
   lmstudio_response_format: "json_schema" # json_schema | text
-  llm_max_tokens: 500
+  llm_max_tokens: 64
+  max_reason_chars: 48
+  min_request_interval_ms: 1000
+  parse_retry_count: 1
+  failure_threshold: 5
+  disable_seconds: 10
+  request_log_path: "logs/llm_requests.jsonl"
+  max_raw_response_chars: 1200
+  mock_return_none: false
+  mock_delay_ms: 0
+  advice_enabled: true
   frame_reasoning_enabled: false
   offline_review_enabled: true
   offline_review_output: "logs/coach_review.md"
@@ -95,9 +111,9 @@ performance:
   opencv_threads: 0
 
 rois:
-  hp_bar: [44, 993, 420, 26]
-  shield_bar: [44, 967, 420, 24]
-  teammate_panel: [1650, 850, 240, 210]
+  hp_bar: [160, 1006, 270, 24]
+  shield_bar: [160, 982, 270, 22]
+  teammate_panel: [20, 735, 430, 200]
   kill_feed: [1490, 120, 390, 220]
 
 # ROI calibration

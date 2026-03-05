@@ -1,7 +1,7 @@
 import argparse
 from types import SimpleNamespace
 
-from apexcoach.cli import _apply_cli_overrides, _parse_region
+from apexcoach.cli import _apply_cli_overrides, _parse_region, _validate_inputs, build_parser
 from apexcoach.config import ApexCoachConfig
 
 
@@ -63,5 +63,18 @@ def test_llm_cli_overrides() -> None:
     assert cfg.llm.enabled is True
     assert cfg.llm.provider == "lmstudio"
     assert cfg.llm.model == "qwen2.5-14b-instruct-q4_k_m.gguf"
+    assert cfg.llm.model_name == "qwen2.5-14b-instruct-q4_k_m.gguf"
     assert cfg.llm.base_url == "http://127.0.0.1:1234"
     assert cfg.llm.offline_review_output == "logs/custom_review.md"
+
+
+def test_validate_inputs_rejects_invalid_llm_provider() -> None:
+    cfg = ApexCoachConfig()
+    cfg.llm.enabled = True
+    cfg.llm.provider = "invalid-provider"
+    parser = build_parser()
+    try:
+        _validate_inputs(cfg, parser, realtime_mode=True)
+        assert False, "expected parser error"
+    except SystemExit:
+        pass

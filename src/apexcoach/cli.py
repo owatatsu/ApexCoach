@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-base-url",
         type=str,
         default=None,
-        help="Local LLM API base URL (default: http://127.0.0.1:11434).",
+        help="Local LLM API base URL (example: http://localhost:1234/v1).",
     )
     parser.add_argument(
         "--llm-review-output",
@@ -145,6 +145,7 @@ def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> N
         config.llm.provider = args.llm_provider
     if args.llm_model:
         config.llm.model = args.llm_model
+        config.llm.model_name = args.llm_model
     if args.llm_base_url:
         config.llm.base_url = args.llm_base_url
     if args.llm_review_output:
@@ -154,6 +155,15 @@ def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> N
 def _validate_inputs(
     config: ApexCoachConfig, parser: argparse.ArgumentParser, realtime_mode: bool
 ) -> None:
+    if config.llm.enabled:
+        provider = (config.llm.provider or "").strip().lower()
+        allowed = {"lmstudio", "mock", "ollama"}
+        if provider not in allowed:
+            parser.error(
+                f"Unsupported llm.provider='{config.llm.provider}'. "
+                f"Supported values: {', '.join(sorted(allowed))}."
+            )
+
     if realtime_mode:
         if config.realtime.monitor_index <= 0:
             parser.error("--monitor must be >= 1 for realtime mode.")

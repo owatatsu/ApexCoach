@@ -52,8 +52,8 @@ LM Studio local server example:
 
 ```bash
 # Start Local Server in LM Studio
-# API endpoint: http://127.0.0.1:1234
-# Model: qwen2.5-14b-instruct-q4_k_m.gguf
+# API endpoint: http://127.0.0.1:1234/v1
+# Model: qwen3.5-9b-instruct (quantized recommended)
 ```
 
 Enable in config:
@@ -62,19 +62,29 @@ Enable in config:
 llm:
   enabled: true
   provider: "lmstudio"
-  model: "qwen2.5-14b-instruct-q4_k_m.gguf"
-  base_url: "http://127.0.0.1:1234"
+  model_name: "qwen3.5-9b-instruct"
+  base_url: "http://127.0.0.1:1234/v1"
   api_key: "lm-studio"
-  lmstudio_response_format: "json_schema"
-  num_ctx: 4096
-  offline_review_max_events: 16
-  offline_review_prompt_max_chars: 12000
+  timeout_ms: 300
+  temperature: 0.1
+  max_reason_chars: 48
+  min_request_interval_ms: 1000
+  parse_retry_count: 1
+  failure_threshold: 5
+  disable_seconds: 10
+  request_log_path: "logs/llm_requests.jsonl"
+  llm_max_tokens: 64
+  advice_enabled: true
   offline_review_enabled: true
   offline_review_output: "logs/coach_review.md"
 ```
 
-Then run normal offline pipeline. After processing, a markdown review is saved to
-`logs/coach_review.md`.
+Then run normal offline/realtime pipeline.
+- Rule engine stays primary.
+- LLM is event-driven, low-frequency helper.
+- Provider failures always fall back to rule decisions.
+- Per-request logs are saved to `logs/llm_requests.jsonl`.
+- Offline review markdown is saved to `logs/coach_review.md`.
 
 CLI override example:
 
@@ -84,8 +94,8 @@ apexcoach ^
   --config config/apexcoach.example.yaml ^
   --llm-enable ^
   --llm-provider lmstudio ^
-  --llm-model qwen2.5-14b-instruct-q4_k_m.gguf ^
-  --llm-base-url http://127.0.0.1:1234 ^
+  --llm-model qwen3.5-9b-instruct ^
+  --llm-base-url http://127.0.0.1:1234/v1 ^
   --llm-review-output logs/coach_review.md
 ```
 
@@ -132,9 +142,16 @@ Recommended overlay settings:
 - `overlay.background_alpha: 0.5`
 - `overlay.text_scale: 0.85`
 
+ROI debug overlay (to verify scan regions):
+
+- `overlay.debug_show_rois: true`
+- `overlay.debug_roi_alpha: 0.35`
+- `overlay.debug_show_roi_labels: true`
+- For realtime visual check, use `overlay.window_mode: "frame"` during debugging
+
 Recommended local models:
 
-- Text coaching: `qwen2.5-14b-instruct-q4_k_m.gguf` (LM Studio)
+- Text coaching: `qwen3.5-9b-instruct` (LM Studio)
 - Vision extension later: `qwen2.5vl:7b`
 
 ## Tests

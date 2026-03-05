@@ -6,7 +6,9 @@ from typing import Any
 from urllib import error, request
 
 from apexcoach.config import LlmConfig
-from apexcoach.models import ArbiterResult, Decision, GameState
+from apexcoach.models import Action, ArbiterResult, Decision, GameState
+from apexcoach.providers.factory import build_provider
+from apexcoach.providers.types import LLMProviderConfig
 
 
 class LlmAdvisor:
@@ -14,6 +16,28 @@ class LlmAdvisor:
 
     def __init__(self, config: LlmConfig) -> None:
         self.config = config
+        self._last_advice_request_ts: float | None = None
+        self._advice_in_flight = False
+        self._advice_provider = None
+        if self.config.enabled and self.config.advice_enabled:
+            provider_cfg = LLMProviderConfig(
+                base_url=self.config.base_url,
+                model_name=self.config.model_name or self.config.model,
+                timeout_ms=int(self.config.timeout_ms),
+                temperature=float(self.config.temperature),
+                max_tokens=int(self.config.llm_max_tokens),
+                max_reason_chars=int(self.config.max_reason_chars),
+                max_raw_response_chars=int(self.config.max_raw_response_chars),
+                parse_retry_count=int(self.config.parse_retry_count),
+                failure_threshold=int(self.config.failure_threshold),
+                disable_seconds=float(self.config.disable_seconds),
+                request_log_path=self.config.request_log_path,
+                api_key=self.config.api_key,
+            )
+            try:
+                self._advice_provider = build_provider(self.config.provider, provider_cfg)
+            except ValueError:
+                self._advice_provider = None
 
     def maybe_explain(
         self,
@@ -32,6 +56,77 @@ class LlmAdvisor:
             f"{arbiter.action.value}: {decision.reason} "
             f"(hp={state.hp_pct:.2f}, shield={state.shield_pct:.2f})"
         )
+
+    def maybe_advise_decision(
+        self,
+        state: GameState,
+        candidates: list[Decision],
+        rule_decision: Decision,
+        timestamp: float,
+        run_now: bool,
+    ) -> tuple[Decision | None, str | None]:
+        if (
+            not self.config.enabled
+            or not self.config.advice_enabled
+            or not run_now
+            or self._advice_provider is None
+        ):
+            return None, None
+        if self._advice_in_flight:
+            return None, "llm_skip:in_flight"
+        if not self._should_request(state=state, rule_decision=rule_decision):
+            return None, None
+
+        min_interval = max(0.0, float(self.config.min_request_interval_ms) / 1000.0)
+        if (
+            self._last_advice_request_ts is not None
+            and timestamp - self._last_advice_request_ts < min_interval
+        ):
+            return None, "llm_skip:rate_limited"
+
+        candidate_actions = [d.action for d in candidates] or [rule_decision.action]
+        if rule_decision.action not in candidate_actions:
+            candidate_actions = [rule_decision.action] + candidate_actions
+        if all(a.value != "NONE" for a in candidate_actions):
+            candidate_actions.append(Action.NONE)
+
+        self._advice_in_flight = True
+        self._last_advice_request_ts = timestamp
+        try:
+            result = self._advice_provider.generate_advice(
+                state=state,
+                candidate_actions=candidate_actions,
+                context={"timestamp": timestamp},
+            )
+        finally:
+            self._advice_in_flight = False
+
+        if result is None:
+            return None, "llm_none"
+
+        selected = None
+        for c in candidates:
+            if c.action == result.action:
+                selected = c
+                break
+        confidence = selected.confidence if selected is not None else 0.65
+        decision = Decision(
+            action=result.action,
+            reason=result.reason,
+            confidence=confidence,
+            meta={
+                "source": "llm",
+                "provider": result.provider_name,
+                "model": result.model_name,
+                "request_id": result.request_id,
+                "latency_ms": round(result.latency_ms, 1),
+            },
+        )
+        reason = (
+            f"{result.action.value}: {result.reason} "
+            f"(provider={result.provider_name}, latency_ms={result.latency_ms:.1f})"
+        )
+        return decision, reason
 
     def generate_offline_review(
         self,
@@ -74,6 +169,22 @@ class LlmAdvisor:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
         return str(out_path)
+
+    def _should_request(self, state: GameState, rule_decision: Decision) -> bool:
+        if state.ally_knock_recent or state.enemy_knock_recent:
+            return True
+        if state.recent_damage_1s >= 0.12:
+            return True
+        if rule_decision.action.value == "NONE":
+            medium_risk = (
+                state.under_fire
+                or (state.hp_pct + state.shield_pct) <= 0.95
+                or state.exposed_no_cover
+                or state.low_ground_disadvantage
+            )
+            if medium_risk:
+                return True
+        return False
 
     def _call_provider(self, prompt: str) -> tuple[dict[str, Any] | None, str | None]:
         provider = (self.config.provider or "").strip().lower()
@@ -162,7 +273,7 @@ class LlmAdvisor:
         self,
         body: dict[str, Any],
     ) -> tuple[dict[str, Any] | None, str | None]:
-        endpoint = self.config.base_url.rstrip("/") + "/v1/chat/completions"
+        endpoint = _build_lmstudio_endpoint(self.config.base_url, "/chat/completions")
         req = request.Request(
             endpoint,
             data=json.dumps(body).encode("utf-8"),
@@ -219,7 +330,7 @@ class LlmAdvisor:
         return model_ids[0], f"LM Studio model auto-selected: {model_ids[0]}"
 
     def _fetch_lmstudio_model_ids(self) -> tuple[list[str], str | None]:
-        endpoint = self.config.base_url.rstrip("/") + "/v1/models"
+        endpoint = _build_lmstudio_endpoint(self.config.base_url, "/models")
         req = request.Request(endpoint, headers=self._build_api_headers(), method="GET")
         try:
             with request.urlopen(req, timeout=float(self.config.timeout_seconds)) as resp:
@@ -650,3 +761,11 @@ def _read_http_error_body(exc: error.HTTPError) -> str:
     if len(text) > 300:
         return text[:300] + "..."
     return text
+
+
+def _build_lmstudio_endpoint(base_url: str, path: str) -> str:
+    base = (base_url or "").rstrip("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if base.endswith("/v1"):
+        return f"{base}{clean_path}"
+    return f"{base}/v1{clean_path}"

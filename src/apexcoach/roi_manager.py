@@ -21,9 +21,20 @@ class RoiManager:
         self._reference_width = max(1, int(reference_width))
         self._reference_height = max(1, int(reference_height))
 
-    def crop(self, frame: "np.ndarray") -> dict[str, "np.ndarray"]:
-        height, width = frame.shape[:2]
+    def crop(
+        self,
+        frame: "np.ndarray",
+        boxes: dict[str, tuple[int, int, int, int]] | None = None,
+    ) -> dict[str, "np.ndarray"]:
         out: dict[str, "np.ndarray"] = {}
+        resolved = boxes if boxes is not None else self.resolve_boxes(frame)
+        for name, (x1, y1, x2, y2) in resolved.items():
+            out[name] = frame[y1:y2, x1:x2]
+        return out
+
+    def resolve_boxes(self, frame: "np.ndarray") -> dict[str, tuple[int, int, int, int]]:
+        height, width = frame.shape[:2]
+        out: dict[str, tuple[int, int, int, int]] = {}
         sx = float(width) / float(self._reference_width)
         sy = float(height) / float(self._reference_height)
 
@@ -34,10 +45,10 @@ class RoiManager:
                 w = int(round(roi.w * sx))
                 h = int(round(roi.h * sy))
             else:
-                x = roi.x
-                y = roi.y
-                w = roi.w
-                h = roi.h
+                x = int(roi.x)
+                y = int(roi.y)
+                w = int(roi.w)
+                h = int(roi.h)
 
             x1 = max(0, x)
             y1 = max(0, y)
@@ -45,6 +56,6 @@ class RoiManager:
             y2 = min(height, y + h)
             if x2 <= x1 or y2 <= y1:
                 continue
-            out[name] = frame[y1:y2, x1:x2]
+            out[name] = (x1, y1, x2, y2)
 
         return out

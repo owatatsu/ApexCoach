@@ -78,6 +78,9 @@ class OverlayConfig:
     panel_width: int = 540
     text_x: int = 36
     text_y: int = 54
+    debug_show_rois: bool = False
+    debug_roi_alpha: float = 0.35
+    debug_show_roi_labels: bool = True
 
 
 @dataclass(slots=True)
@@ -108,14 +111,26 @@ class LoggingConfig:
 class LlmConfig:
     enabled: bool = False
     provider: str = "lmstudio"
-    model: str = "qwen2.5-14b-instruct-q4_k_m.gguf"
-    base_url: str = "http://127.0.0.1:1234"
+    model: str = "qwen3.5-9b-instruct"
+    model_name: str = "qwen3.5-9b-instruct"
+    base_url: str = "http://127.0.0.1:1234/v1"
     api_key: str = "lm-studio"
-    timeout_seconds: float = 45.0
-    temperature: float = 0.2
+    timeout_seconds: float = 45.0  # offline review path
+    timeout_ms: int = 300  # realtime advisor path
+    temperature: float = 0.1
     num_ctx: int = 4096
     lmstudio_response_format: str = "json_schema"
-    llm_max_tokens: int = 500
+    llm_max_tokens: int = 64
+    max_reason_chars: int = 48
+    min_request_interval_ms: int = 1000
+    parse_retry_count: int = 1
+    failure_threshold: int = 5
+    disable_seconds: float = 10.0
+    request_log_path: str = "logs/llm_requests.jsonl"
+    max_raw_response_chars: int = 1200
+    mock_return_none: bool = False
+    mock_delay_ms: int = 0
+    advice_enabled: bool = True
     frame_reasoning_enabled: bool = False
     offline_review_enabled: bool = True
     offline_review_output: str = "logs/coach_review.md"
@@ -135,10 +150,11 @@ class PerformanceConfig:
 
 def default_rois() -> dict[str, Roi]:
     return {
-        # Baseline for 1920x1080, bottom-left player HUD.
-        "hp_bar": Roi(44, 993, 420, 26),
-        "shield_bar": Roi(44, 967, 420, 24),
-        "teammate_panel": Roi(1650, 850, 240, 210),
+        # Baseline for 1920x1080 (Apex HUD with teammate panel on left-middle).
+        # Use overlay.debug_show_rois=true to visually fine tune per resolution/UI scale.
+        "hp_bar": Roi(42, 1006, 420, 24),
+        "shield_bar": Roi(42, 982, 420, 22),
+        "teammate_panel": Roi(20, 735, 430, 220),
         "kill_feed": Roi(1490, 120, 390, 220),
     }
 

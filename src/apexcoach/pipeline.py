@@ -101,6 +101,7 @@ class OfflinePipeline:
         tactical = ParsedTactical()
         decision = Decision(action=Action.NONE, reason="init", confidence=0.0)
         display_lines: list[str] | None = None
+        llm_reason: str | None = None
         arbiter_result = ArbiterResult(
             action=Action.NONE,
             emitted=False,
@@ -143,7 +144,9 @@ class OfflinePipeline:
 
                 for packet in packet_iter:
                     frames += 1
-                    rois = roi_manager.crop(packet.frame)
+                    llm_reason = None
+                    roi_boxes = roi_manager.resolve_boxes(packet.frame)
+                    rois = roi_manager.crop(packet.frame, boxes=roi_boxes)
 
                     if ui_gate.ready(packet.timestamp):
                         status = ui_parser.parse_status(packet, rois)
@@ -166,7 +169,7 @@ class OfflinePipeline:
 
                     if decision_gate.ready(packet.timestamp):
                         candidates = decision_engine.decide_candidates(state)
-                        decision = (
+                        rule_decision = (
                             candidates[0]
                             if candidates
                             else Decision(
@@ -175,6 +178,15 @@ class OfflinePipeline:
                                 confidence=0.5,
                             )
                         )
+                        advised_decision, llm_note = llm.maybe_advise_decision(
+                            state=state,
+                            candidates=candidates,
+                            rule_decision=rule_decision,
+                            timestamp=packet.timestamp,
+                            run_now=llm_gate.ready(packet.timestamp),
+                        )
+                        decision = advised_decision or rule_decision
+                        llm_reason = llm_note
                         display_lines = _format_display_lines(
                             candidates, max_lines=self.config.overlay.max_lines
                         )
@@ -185,12 +197,17 @@ class OfflinePipeline:
                             state.last_action_time = packet.timestamp
                         action_counts[arbiter_result.action.value] += 1
 
-                    llm_reason = llm.maybe_explain(
+                    log_llm_reason = llm_reason
+                    overlay_llm_reason = _to_overlay_llm_message(llm_reason)
+                    explain_reason = llm.maybe_explain(
                         state=state,
                         decision=decision,
                         arbiter=arbiter_result,
                         run_now=llm_gate.ready(packet.timestamp),
                     )
+                    if explain_reason:
+                        log_llm_reason = explain_reason
+                        overlay_llm_reason = explain_reason
 
                     output_frame = packet.frame
                     if overlay_gate.ready(packet.timestamp):
@@ -200,6 +217,8 @@ class OfflinePipeline:
                             reason=decision.reason,
                             timestamp=packet.timestamp,
                             decision_lines=display_lines,
+                            llm_message=overlay_llm_reason,
+                            roi_boxes=roi_boxes,
                         )
 
                     if async_writer is not None:
@@ -213,7 +232,7 @@ class OfflinePipeline:
                         events=events,
                         decision=decision,
                         arbiter=arbiter_result,
-                        llm_reason=llm_reason,
+                        llm_reason=log_llm_reason,
                     )
         finally:
             if prefetch_stream is not None:
@@ -298,6 +317,7 @@ class RealtimePipeline:
         tactical = ParsedTactical()
         decision = Decision(action=Action.NONE, reason="init", confidence=0.0)
         display_lines: list[str] | None = None
+        llm_reason: str | None = None
         arbiter_result = ArbiterResult(
             action=Action.NONE,
             emitted=False,
@@ -343,7 +363,9 @@ class RealtimePipeline:
                         break
 
                     frames += 1
-                    rois = roi_manager.crop(packet.frame)
+                    llm_reason = None
+                    roi_boxes = roi_manager.resolve_boxes(packet.frame)
+                    rois = roi_manager.crop(packet.frame, boxes=roi_boxes)
 
                     if ui_gate.ready(packet.timestamp):
                         status = ui_parser.parse_status(packet, rois)
@@ -366,7 +388,7 @@ class RealtimePipeline:
 
                     if decision_gate.ready(packet.timestamp):
                         candidates = decision_engine.decide_candidates(state)
-                        decision = (
+                        rule_decision = (
                             candidates[0]
                             if candidates
                             else Decision(
@@ -375,6 +397,15 @@ class RealtimePipeline:
                                 confidence=0.5,
                             )
                         )
+                        advised_decision, llm_note = llm.maybe_advise_decision(
+                            state=state,
+                            candidates=candidates,
+                            rule_decision=rule_decision,
+                            timestamp=packet.timestamp,
+                            run_now=llm_gate.ready(packet.timestamp),
+                        )
+                        decision = advised_decision or rule_decision
+                        llm_reason = llm_note
                         display_lines = _format_display_lines(
                             candidates, max_lines=self.config.overlay.max_lines
                         )
@@ -385,12 +416,17 @@ class RealtimePipeline:
                             state.last_action_time = packet.timestamp
                         action_counts[arbiter_result.action.value] += 1
 
-                    llm_reason = llm.maybe_explain(
+                    log_llm_reason = llm_reason
+                    overlay_llm_reason = _to_overlay_llm_message(llm_reason)
+                    explain_reason = llm.maybe_explain(
                         state=state,
                         decision=decision,
                         arbiter=arbiter_result,
                         run_now=llm_gate.ready(packet.timestamp),
                     )
+                    if explain_reason:
+                        log_llm_reason = explain_reason
+                        overlay_llm_reason = explain_reason
 
                     output_frame = packet.frame
                     if overlay_gate.ready(packet.timestamp):
@@ -400,6 +436,8 @@ class RealtimePipeline:
                             reason=decision.reason,
                             timestamp=packet.timestamp,
                             decision_lines=display_lines,
+                            llm_message=overlay_llm_reason,
+                            roi_boxes=roi_boxes,
                         )
 
                     if async_writer is not None:
@@ -413,7 +451,7 @@ class RealtimePipeline:
                         events=events,
                         decision=decision,
                         arbiter=arbiter_result,
-                        llm_reason=llm_reason,
+                        llm_reason=log_llm_reason,
                     )
         except KeyboardInterrupt:
             pass
@@ -472,6 +510,25 @@ def _format_display_lines(candidates: list[Decision], max_lines: int) -> list[st
     for d in candidates[:limit]:
         out.append(f"{d.action.value} | {d.reason}")
     return out
+
+
+def _to_overlay_llm_message(raw_reason: str | None) -> str | None:
+    text = (raw_reason or "").strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    internal_prefixes = (
+        "llm_skip:",
+        "llm_none",
+        "provider_disabled",
+        "network_error",
+        "timeout",
+        "http_",
+    )
+    if lowered.startswith(internal_prefixes):
+        return None
+    return text
 
 
 def _configure_opencv_threads(thread_count: int) -> None:
