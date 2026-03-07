@@ -96,7 +96,12 @@ class LlmAdvisor:
             result = self._advice_provider.generate_advice(
                 state=state,
                 candidate_actions=candidate_actions,
-                context={"timestamp": timestamp},
+                context=_build_advice_context(
+                    state=state,
+                    candidates=candidates,
+                    rule_decision=rule_decision,
+                    timestamp=timestamp,
+                ),
             )
         finally:
             self._advice_in_flight = False
@@ -384,6 +389,38 @@ class LlmAdvisor:
         if translated and _contains_japanese_text_in_json(translated):
             return translated, "LLM output translated to Japanese."
         return result, _merge_error("Japanese enforcement failed", err)
+
+
+def _build_advice_context(
+    state: GameState,
+    candidates: list[Decision],
+    rule_decision: Decision,
+    timestamp: float,
+) -> dict[str, Any]:
+    decision_trigger = "routine"
+    if state.enemy_knock_recent or state.ally_knock_recent:
+        decision_trigger = "knock_event"
+    elif state.recent_damage_1s >= 0.12:
+        decision_trigger = "damage_spike"
+    elif state.under_fire:
+        decision_trigger = "under_fire"
+    elif state.low_ground_disadvantage or state.exposed_no_cover:
+        decision_trigger = "tactical_risk"
+
+    return {
+        "timestamp": round(timestamp, 3),
+        "decision_trigger": decision_trigger,
+        "rule_decision": _serialize_decision(rule_decision),
+        "candidate_details": [_serialize_decision(candidate) for candidate in candidates],
+    }
+
+
+def _serialize_decision(decision: Decision) -> dict[str, Any]:
+    return {
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "confidence": round(float(decision.confidence), 3),
+    }
 
 
 def _build_review_payload(

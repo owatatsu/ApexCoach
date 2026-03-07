@@ -2,7 +2,11 @@ import json
 from urllib import error
 
 from apexcoach.config import LlmConfig
-from apexcoach.llm_advisor import LlmAdvisor, _build_review_payload
+from apexcoach.llm_advisor import (
+    LlmAdvisor,
+    _build_advice_context,
+    _build_review_payload,
+)
 from apexcoach.models import Action, ArbiterResult, Decision, GameState
 
 
@@ -20,6 +24,34 @@ def test_maybe_explain_disabled_by_default() -> None:
         run_now=True,
     )
     assert result is None
+
+
+def test_build_advice_context_includes_candidates_and_trigger() -> None:
+    state = GameState(
+        timestamp=5.0,
+        hp_pct=0.4,
+        shield_pct=0.3,
+        recent_damage_1s=0.15,
+        under_fire=True,
+    )
+    context = _build_advice_context(
+        state=state,
+        candidates=[
+            Decision(action=Action.RETREAT, reason="High incoming damage in last 1s.", confidence=0.9),
+            Decision(action=Action.NONE, reason="No strong signal.", confidence=0.5),
+        ],
+        rule_decision=Decision(
+            action=Action.RETREAT,
+            reason="High incoming damage in last 1s.",
+            confidence=0.9,
+        ),
+        timestamp=5.25,
+    )
+
+    assert context["decision_trigger"] == "damage_spike"
+    assert context["timestamp"] == 5.25
+    assert context["rule_decision"]["action"] == "RETREAT"
+    assert context["candidate_details"][1]["action"] == "NONE"
 
 
 def test_build_review_payload_extracts_timeline(tmp_path) -> None:

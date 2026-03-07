@@ -81,6 +81,7 @@ class LMStudioProvider(BaseLLMProvider):
             candidate_actions=candidates,
             max_reason_chars=self.config.max_reason_chars,
             language="ja",
+            context=context,
         )
         retry_count = max(0, int(self.config.parse_retry_count))
 

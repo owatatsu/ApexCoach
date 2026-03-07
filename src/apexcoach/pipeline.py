@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Full, Queue
 from threading import Event, Thread
-from typing import Iterator
+from typing import Any, Iterator
 
 from apexcoach.action_arbiter import ActionArbiter
 from apexcoach.capture_service import ScreenCaptureService, VideoCaptureService
 from apexcoach.config import ApexCoachConfig
+from apexcoach.display_text import format_instruction_line, localize_reason
 from apexcoach.event_detector import EventDetector
 from apexcoach.llm_advisor import LlmAdvisor
 from apexcoach.models import (
     Action,
     ArbiterResult,
     Decision,
+    FramePacket,
+    GameState,
     ParsedNotifications,
     ParsedStatus,
     ParsedTactical,
@@ -49,6 +53,217 @@ class RateGate:
         return True
 
 
+@dataclass(slots=True)
+class _PipelineRuntime:
+    status: ParsedStatus = field(
+        default_factory=lambda: ParsedStatus(
+            hp_pct=1.0,
+            shield_pct=1.0,
+            allies_alive=3,
+            allies_down=0,
+        )
+    )
+    tactical: ParsedTactical = field(default_factory=ParsedTactical)
+    decision: Decision = field(
+        default_factory=lambda: Decision(
+            action=Action.NONE,
+            reason="init",
+            confidence=0.0,
+        )
+    )
+    display_lines: list[str] | None = None
+    arbiter_result: ArbiterResult = field(
+        default_factory=lambda: ArbiterResult(
+            action=Action.NONE,
+            emitted=False,
+            reason="init",
+            source_action=Action.NONE,
+            debug_notes=[],
+        )
+    )
+    action_counts: Counter[str] = field(default_factory=Counter)
+
+
+class _PipelineSession:
+    def __init__(self, config: ApexCoachConfig) -> None:
+        self.config = config
+        telemetry_reader = None
+        if self.config.offline.telemetry_jsonl:
+            telemetry_reader = TelemetryReader(self.config.offline.telemetry_jsonl)
+
+        self.ui_parser = SimpleUiParser(telemetry=telemetry_reader)
+        self.roi_manager = RoiManager(
+            self.config.rois,
+            scale_to_frame=self.config.scale_rois_to_frame,
+            reference_width=self.config.roi_reference_width,
+            reference_height=self.config.roi_reference_height,
+        )
+        self.event_detector = EventDetector(
+            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
+            min_damage_event_delta=self.config.thresholds.min_damage_event_delta,
+        )
+        self.state_aggregator = StateAggregator(
+            knock_recent_seconds=self.config.thresholds.knock_recent_seconds,
+            under_fire_damage_1s=self.config.thresholds.under_fire_damage_1s,
+            retreat_low_total_hp_shield=self.config.thresholds.low_total_hp_shield,
+            heal_total_hp_shield=self.config.thresholds.heal_total_hp_shield,
+            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
+            movement_score_threshold=self.config.thresholds.movement_score_threshold,
+        )
+        self.decision_engine = RuleDecisionEngine(self.config.thresholds)
+        self.arbiter = ActionArbiter(self.config.arbiter)
+        self.overlay = OverlayRenderer(self.config.overlay)
+        self.llm = LlmAdvisor(self.config.llm)
+        self.logger = SessionLogger(
+            path=self.config.logging.path,
+            enabled=self.config.logging.enabled,
+        )
+
+        self.ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
+        self.ocr_gate = RateGate(self.config.frequencies.ocr_fps)
+        self.decision_gate = RateGate(self.config.frequencies.decision_fps)
+        self.llm_gate = RateGate(self.config.frequencies.llm_fps)
+        self.overlay_gate = RateGate(self.config.frequencies.overlay_fps)
+
+        self.runtime = _PipelineRuntime()
+        self.frames = 0
+        self.writer: Any | None = None
+        self.async_writer: AsyncFrameWriter | None = None
+
+    def configure_output(self, width: int, height: int, fps: float) -> None:
+        if not self.config.offline.output_video:
+            return
+
+        self.writer = _create_video_writer(
+            self.config.offline.output_video,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+        if self.config.performance.parallel_io:
+            self.async_writer = AsyncFrameWriter(
+                writer=self.writer,
+                queue_size=self.config.performance.write_queue_size,
+            )
+
+    def process_packet(self, packet: FramePacket) -> Any:
+        self.frames += 1
+        runtime = self.runtime
+        llm_reason: str | None = None
+
+        roi_boxes = self.roi_manager.resolve_boxes(packet.frame)
+        rois = self.roi_manager.crop(packet.frame, boxes=roi_boxes)
+
+        if self.ui_gate.ready(packet.timestamp):
+            runtime.status = self.ui_parser.parse_status(packet, rois)
+            runtime.tactical = self.ui_parser.parse_tactical(packet, rois)
+
+        notifications = ParsedNotifications()
+        if self.ocr_gate.ready(packet.timestamp):
+            notifications = self.ui_parser.parse_notifications(packet, rois)
+
+        events = self.event_detector.detect(
+            status=runtime.status,
+            notifications=notifications,
+            timestamp=packet.timestamp,
+        )
+        state = self.state_aggregator.update(
+            status=runtime.status,
+            events=events,
+            tactical=runtime.tactical,
+        )
+
+        if self.decision_gate.ready(packet.timestamp):
+            llm_reason = self._update_decision(state, packet.timestamp)
+
+        log_llm_reason = llm_reason
+        overlay_llm_reason = _to_overlay_llm_message(llm_reason)
+        explain_reason = self.llm.maybe_explain(
+            state=state,
+            decision=runtime.decision,
+            arbiter=runtime.arbiter_result,
+            run_now=self.llm_gate.ready(packet.timestamp),
+        )
+        if explain_reason:
+            log_llm_reason = explain_reason
+            overlay_llm_reason = explain_reason
+
+        output_frame = packet.frame
+        if self.overlay_gate.ready(packet.timestamp):
+            output_frame = self.overlay.render(
+                frame=packet.frame,
+                action=runtime.arbiter_result.action,
+                reason=localize_reason(runtime.decision.reason),
+                timestamp=packet.timestamp,
+                decision_lines=runtime.display_lines,
+                llm_message=overlay_llm_reason,
+                roi_boxes=roi_boxes,
+            )
+
+        self.logger.log_frame(
+            packet=packet,
+            state=state,
+            events=events,
+            decision=runtime.decision,
+            arbiter=runtime.arbiter_result,
+            llm_reason=log_llm_reason,
+        )
+        return output_frame
+
+    def write_output(self, frame: Any) -> None:
+        if self.async_writer is not None:
+            self.async_writer.write(frame)
+            return
+        if self.writer is not None:
+            self.writer.write(frame)
+
+    def summary(self) -> dict[str, int]:
+        return _build_summary(self.frames, self.runtime.action_counts)
+
+    def generate_offline_review(self) -> str | None:
+        return self.llm.generate_offline_review(
+            session_log_path=self.config.logging.path,
+            summary=self.summary(),
+        )
+
+    def close(self) -> None:
+        if self.async_writer is not None:
+            self.async_writer.close()
+            self.async_writer = None
+            self.writer = None
+        elif self.writer is not None:
+            self.writer.release()
+            self.writer = None
+        self.overlay.close()
+        self.logger.close()
+
+    def _update_decision(self, state: GameState, timestamp: float) -> str | None:
+        runtime = self.runtime
+        candidates = self.decision_engine.decide_candidates(state)
+        rule_decision = _select_rule_decision(candidates)
+        advised_decision, llm_reason = self.llm.maybe_advise_decision(
+            state=state,
+            candidates=candidates,
+            rule_decision=rule_decision,
+            timestamp=timestamp,
+            run_now=self.llm_gate.ready(timestamp),
+        )
+        runtime.decision = advised_decision or rule_decision
+        runtime.display_lines = _format_display_lines(
+            candidates,
+            max_lines=self.config.overlay.max_lines,
+        )
+        runtime.arbiter_result = self.arbiter.arbitrate(runtime.decision, timestamp)
+        _record_action_transition(
+            state_aggregator=self.state_aggregator,
+            state=state,
+            action=runtime.arbiter_result.action,
+            timestamp=timestamp,
+        )
+        runtime.action_counts[runtime.arbiter_result.action.value] += 1
+        return llm_reason
+
+
 class OfflinePipeline:
     def __init__(self, config: ApexCoachConfig) -> None:
         self.config = config
@@ -59,80 +274,22 @@ class OfflinePipeline:
             raise ValueError("Offline input_video is required.")
         _configure_opencv_threads(self.config.performance.opencv_threads)
 
-        telemetry_reader = None
-        if self.config.offline.telemetry_jsonl:
-            telemetry_reader = TelemetryReader(self.config.offline.telemetry_jsonl)
-
-        ui_parser = SimpleUiParser(telemetry=telemetry_reader)
-        roi_manager = RoiManager(
-            self.config.rois,
-            scale_to_frame=self.config.scale_rois_to_frame,
-            reference_width=self.config.roi_reference_width,
-            reference_height=self.config.roi_reference_height,
-        )
-        event_detector = EventDetector(
-            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
-            min_damage_event_delta=self.config.thresholds.min_damage_event_delta,
-        )
-        state_aggregator = StateAggregator(
-            knock_recent_seconds=self.config.thresholds.knock_recent_seconds,
-            under_fire_damage_1s=self.config.thresholds.under_fire_damage_1s,
-            retreat_low_total_hp_shield=self.config.thresholds.low_total_hp_shield,
-            heal_total_hp_shield=self.config.thresholds.heal_total_hp_shield,
-            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
-            movement_score_threshold=self.config.thresholds.movement_score_threshold,
-        )
-        decision_engine = RuleDecisionEngine(self.config.thresholds)
-        arbiter = ActionArbiter(self.config.arbiter)
-        overlay = OverlayRenderer(self.config.overlay)
-        llm = LlmAdvisor(self.config.llm)
-        logger = SessionLogger(
-            path=self.config.logging.path,
-            enabled=self.config.logging.enabled,
-        )
-
-        ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
-        ocr_gate = RateGate(self.config.frequencies.ocr_fps)
-        decision_gate = RateGate(self.config.frequencies.decision_fps)
-        llm_gate = RateGate(self.config.frequencies.llm_fps)
-        overlay_gate = RateGate(self.config.frequencies.overlay_fps)
-
-        status = ParsedStatus(hp_pct=1.0, shield_pct=1.0, allies_alive=3, allies_down=0)
-        tactical = ParsedTactical()
-        decision = Decision(action=Action.NONE, reason="init", confidence=0.0)
-        display_lines: list[str] | None = None
-        llm_reason: str | None = None
-        arbiter_result = ArbiterResult(
-            action=Action.NONE,
-            emitted=False,
-            reason="init",
-            source_action=Action.NONE,
-            debug_notes=[],
-        )
-
-        action_counts: Counter[str] = Counter()
-        writer = None
-        async_writer: AsyncFrameWriter | None = None
+        session = _PipelineSession(self.config)
         prefetch_stream: PrefetchFrameStream | None = None
-        frames = 0
 
         try:
             with VideoCaptureService(
                 video_path=video_path,
                 target_fps=self.config.frequencies.capture_fps,
             ) as capture:
-                if self.config.offline.output_video:
-                    writer = _create_video_writer(
-                        self.config.offline.output_video,
-                        width=capture.width,
-                        height=capture.height,
-                        fps=max(1.0, capture.source_fps or self.config.frequencies.capture_fps),
-                    )
-                    if self.config.performance.parallel_io:
-                        async_writer = AsyncFrameWriter(
-                            writer=writer,
-                            queue_size=self.config.performance.write_queue_size,
-                        )
+                session.configure_output(
+                    width=capture.width,
+                    height=capture.height,
+                    fps=max(
+                        1.0,
+                        capture.source_fps or self.config.frequencies.capture_fps,
+                    ),
+                )
 
                 packet_iter: Iterator = capture.iter_frames()
                 if self.config.performance.parallel_io:
@@ -143,128 +300,21 @@ class OfflinePipeline:
                     packet_iter = iter(prefetch_stream)
 
                 for packet in packet_iter:
-                    frames += 1
-                    llm_reason = None
-                    roi_boxes = roi_manager.resolve_boxes(packet.frame)
-                    rois = roi_manager.crop(packet.frame, boxes=roi_boxes)
-
-                    if ui_gate.ready(packet.timestamp):
-                        status = ui_parser.parse_status(packet, rois)
-                        tactical = ui_parser.parse_tactical(packet, rois)
-
-                    notifications = ParsedNotifications()
-                    if ocr_gate.ready(packet.timestamp):
-                        notifications = ui_parser.parse_notifications(packet, rois)
-
-                    events = event_detector.detect(
-                        status=status,
-                        notifications=notifications,
-                        timestamp=packet.timestamp,
-                    )
-                    state = state_aggregator.update(
-                        status=status,
-                        events=events,
-                        tactical=tactical,
-                    )
-
-                    if decision_gate.ready(packet.timestamp):
-                        candidates = decision_engine.decide_candidates(state)
-                        rule_decision = (
-                            candidates[0]
-                            if candidates
-                            else Decision(
-                                action=Action.NONE,
-                                reason="No strong signal.",
-                                confidence=0.5,
-                            )
-                        )
-                        advised_decision, llm_note = llm.maybe_advise_decision(
-                            state=state,
-                            candidates=candidates,
-                            rule_decision=rule_decision,
-                            timestamp=packet.timestamp,
-                            run_now=llm_gate.ready(packet.timestamp),
-                        )
-                        decision = advised_decision or rule_decision
-                        llm_reason = llm_note
-                        display_lines = _format_display_lines(
-                            candidates, max_lines=self.config.overlay.max_lines
-                        )
-                        arbiter_result = arbiter.arbitrate(decision, packet.timestamp)
-                        if state.last_action != arbiter_result.action:
-                            state_aggregator.record_action(arbiter_result.action, packet.timestamp)
-                            state.last_action = arbiter_result.action
-                            state.last_action_time = packet.timestamp
-                        action_counts[arbiter_result.action.value] += 1
-
-                    log_llm_reason = llm_reason
-                    overlay_llm_reason = _to_overlay_llm_message(llm_reason)
-                    explain_reason = llm.maybe_explain(
-                        state=state,
-                        decision=decision,
-                        arbiter=arbiter_result,
-                        run_now=llm_gate.ready(packet.timestamp),
-                    )
-                    if explain_reason:
-                        log_llm_reason = explain_reason
-                        overlay_llm_reason = explain_reason
-
-                    output_frame = packet.frame
-                    if overlay_gate.ready(packet.timestamp):
-                        output_frame = overlay.render(
-                            frame=packet.frame,
-                            action=arbiter_result.action,
-                            reason=decision.reason,
-                            timestamp=packet.timestamp,
-                            decision_lines=display_lines,
-                            llm_message=overlay_llm_reason,
-                            roi_boxes=roi_boxes,
-                        )
-
-                    if async_writer is not None:
-                        async_writer.write(output_frame)
-                    elif writer is not None:
-                        writer.write(output_frame)
-
-                    logger.log_frame(
-                        packet=packet,
-                        state=state,
-                        events=events,
-                        decision=decision,
-                        arbiter=arbiter_result,
-                        llm_reason=log_llm_reason,
-                    )
+                    session.write_output(session.process_packet(packet))
         finally:
             if prefetch_stream is not None:
                 prefetch_stream.close()
-            if async_writer is not None:
-                async_writer.close()
-            elif writer is not None:
-                writer.release()
-            overlay.close()
-            logger.close()
+            session.close()
 
-        if frames == 0:
+        if session.frames == 0:
             raise RuntimeError(
                 "No decodable frames were read from input video. "
                 "This often happens with unsupported AV1 streams in the current OpenCV/FFmpeg build. "
                 "Transcode the input to H.264 (yuv420p) and retry."
             )
 
-        summary = {
-            "frames": frames,
-            "NONE": action_counts.get("NONE", 0),
-            "HEAL": action_counts.get("HEAL", 0),
-            "RETREAT": action_counts.get("RETREAT", 0),
-            "TAKE_COVER": action_counts.get("TAKE_COVER", 0),
-            "TAKE_HIGH_GROUND": action_counts.get("TAKE_HIGH_GROUND", 0),
-            "PUSH": action_counts.get("PUSH", 0),
-        }
-
-        llm.generate_offline_review(
-            session_log_path=self.config.logging.path,
-            summary=summary,
-        )
+        summary = session.summary()
+        session.generate_offline_review()
 
         return summary
 
@@ -275,62 +325,7 @@ class RealtimePipeline:
 
     def run(self) -> dict[str, int]:
         _configure_opencv_threads(self.config.performance.opencv_threads)
-        telemetry_reader = None
-        if self.config.offline.telemetry_jsonl:
-            telemetry_reader = TelemetryReader(self.config.offline.telemetry_jsonl)
-
-        ui_parser = SimpleUiParser(telemetry=telemetry_reader)
-        roi_manager = RoiManager(
-            self.config.rois,
-            scale_to_frame=self.config.scale_rois_to_frame,
-            reference_width=self.config.roi_reference_width,
-            reference_height=self.config.roi_reference_height,
-        )
-        event_detector = EventDetector(
-            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
-            min_damage_event_delta=self.config.thresholds.min_damage_event_delta,
-        )
-        state_aggregator = StateAggregator(
-            knock_recent_seconds=self.config.thresholds.knock_recent_seconds,
-            under_fire_damage_1s=self.config.thresholds.under_fire_damage_1s,
-            retreat_low_total_hp_shield=self.config.thresholds.low_total_hp_shield,
-            heal_total_hp_shield=self.config.thresholds.heal_total_hp_shield,
-            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
-            movement_score_threshold=self.config.thresholds.movement_score_threshold,
-        )
-        decision_engine = RuleDecisionEngine(self.config.thresholds)
-        arbiter = ActionArbiter(self.config.arbiter)
-        overlay = OverlayRenderer(self.config.overlay)
-        llm = LlmAdvisor(self.config.llm)
-        logger = SessionLogger(
-            path=self.config.logging.path,
-            enabled=self.config.logging.enabled,
-        )
-
-        ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
-        ocr_gate = RateGate(self.config.frequencies.ocr_fps)
-        decision_gate = RateGate(self.config.frequencies.decision_fps)
-        llm_gate = RateGate(self.config.frequencies.llm_fps)
-        overlay_gate = RateGate(self.config.frequencies.overlay_fps)
-
-        status = ParsedStatus(hp_pct=1.0, shield_pct=1.0, allies_alive=3, allies_down=0)
-        tactical = ParsedTactical()
-        decision = Decision(action=Action.NONE, reason="init", confidence=0.0)
-        display_lines: list[str] | None = None
-        llm_reason: str | None = None
-        arbiter_result = ArbiterResult(
-            action=Action.NONE,
-            emitted=False,
-            reason="init",
-            source_action=Action.NONE,
-            debug_notes=[],
-        )
-
-        action_counts: Counter[str] = Counter()
-        writer = None
-        async_writer: AsyncFrameWriter | None = None
-        prefetch_stream: PrefetchFrameStream | None = None
-        frames = 0
+        session = _PipelineSession(self.config)
 
         region = _resolve_realtime_region(self.config)
         duration_seconds = max(0.0, float(self.config.realtime.duration_seconds))
@@ -341,18 +336,11 @@ class RealtimePipeline:
                 monitor_index=self.config.realtime.monitor_index,
                 region=region,
             ) as capture:
-                if self.config.offline.output_video:
-                    writer = _create_video_writer(
-                        self.config.offline.output_video,
-                        width=capture.width,
-                        height=capture.height,
-                        fps=max(1.0, float(self.config.frequencies.capture_fps)),
-                    )
-                    if self.config.performance.parallel_io:
-                        async_writer = AsyncFrameWriter(
-                            writer=writer,
-                            queue_size=self.config.performance.write_queue_size,
-                        )
+                session.configure_output(
+                    width=capture.width,
+                    height=capture.height,
+                    fps=max(1.0, float(self.config.frequencies.capture_fps)),
+                )
 
                 # mss capture object is thread-affine on Windows.
                 # Realtime frame grabbing must remain on the same thread.
@@ -362,118 +350,48 @@ class RealtimePipeline:
                     if duration_seconds > 0.0 and packet.timestamp >= duration_seconds:
                         break
 
-                    frames += 1
-                    llm_reason = None
-                    roi_boxes = roi_manager.resolve_boxes(packet.frame)
-                    rois = roi_manager.crop(packet.frame, boxes=roi_boxes)
-
-                    if ui_gate.ready(packet.timestamp):
-                        status = ui_parser.parse_status(packet, rois)
-                        tactical = ui_parser.parse_tactical(packet, rois)
-
-                    notifications = ParsedNotifications()
-                    if ocr_gate.ready(packet.timestamp):
-                        notifications = ui_parser.parse_notifications(packet, rois)
-
-                    events = event_detector.detect(
-                        status=status,
-                        notifications=notifications,
-                        timestamp=packet.timestamp,
-                    )
-                    state = state_aggregator.update(
-                        status=status,
-                        events=events,
-                        tactical=tactical,
-                    )
-
-                    if decision_gate.ready(packet.timestamp):
-                        candidates = decision_engine.decide_candidates(state)
-                        rule_decision = (
-                            candidates[0]
-                            if candidates
-                            else Decision(
-                                action=Action.NONE,
-                                reason="No strong signal.",
-                                confidence=0.5,
-                            )
-                        )
-                        advised_decision, llm_note = llm.maybe_advise_decision(
-                            state=state,
-                            candidates=candidates,
-                            rule_decision=rule_decision,
-                            timestamp=packet.timestamp,
-                            run_now=llm_gate.ready(packet.timestamp),
-                        )
-                        decision = advised_decision or rule_decision
-                        llm_reason = llm_note
-                        display_lines = _format_display_lines(
-                            candidates, max_lines=self.config.overlay.max_lines
-                        )
-                        arbiter_result = arbiter.arbitrate(decision, packet.timestamp)
-                        if state.last_action != arbiter_result.action:
-                            state_aggregator.record_action(arbiter_result.action, packet.timestamp)
-                            state.last_action = arbiter_result.action
-                            state.last_action_time = packet.timestamp
-                        action_counts[arbiter_result.action.value] += 1
-
-                    log_llm_reason = llm_reason
-                    overlay_llm_reason = _to_overlay_llm_message(llm_reason)
-                    explain_reason = llm.maybe_explain(
-                        state=state,
-                        decision=decision,
-                        arbiter=arbiter_result,
-                        run_now=llm_gate.ready(packet.timestamp),
-                    )
-                    if explain_reason:
-                        log_llm_reason = explain_reason
-                        overlay_llm_reason = explain_reason
-
-                    output_frame = packet.frame
-                    if overlay_gate.ready(packet.timestamp):
-                        output_frame = overlay.render(
-                            frame=packet.frame,
-                            action=arbiter_result.action,
-                            reason=decision.reason,
-                            timestamp=packet.timestamp,
-                            decision_lines=display_lines,
-                            llm_message=overlay_llm_reason,
-                            roi_boxes=roi_boxes,
-                        )
-
-                    if async_writer is not None:
-                        async_writer.write(output_frame)
-                    elif writer is not None:
-                        writer.write(output_frame)
-
-                    logger.log_frame(
-                        packet=packet,
-                        state=state,
-                        events=events,
-                        decision=decision,
-                        arbiter=arbiter_result,
-                        llm_reason=log_llm_reason,
-                    )
+                    session.write_output(session.process_packet(packet))
         except KeyboardInterrupt:
             pass
         finally:
-            if prefetch_stream is not None:
-                prefetch_stream.close()
-            if async_writer is not None:
-                async_writer.close()
-            elif writer is not None:
-                writer.release()
-            overlay.close()
-            logger.close()
+            session.close()
 
-        return {
-            "frames": frames,
-            "NONE": action_counts.get("NONE", 0),
-            "HEAL": action_counts.get("HEAL", 0),
-            "RETREAT": action_counts.get("RETREAT", 0),
-            "TAKE_COVER": action_counts.get("TAKE_COVER", 0),
-            "TAKE_HIGH_GROUND": action_counts.get("TAKE_HIGH_GROUND", 0),
-            "PUSH": action_counts.get("PUSH", 0),
-        }
+        return session.summary()
+
+
+def _select_rule_decision(candidates: list[Decision]) -> Decision:
+    if candidates:
+        return candidates[0]
+    return Decision(
+        action=Action.NONE,
+        reason="No strong signal.",
+        confidence=0.5,
+    )
+
+
+def _record_action_transition(
+    state_aggregator: StateAggregator,
+    state: GameState,
+    action: Action,
+    timestamp: float,
+) -> None:
+    if state.last_action == action:
+        return
+    state_aggregator.record_action(action, timestamp)
+    state.last_action = action
+    state.last_action_time = timestamp
+
+
+def _build_summary(frames: int, action_counts: Counter[str]) -> dict[str, int]:
+    return {
+        "frames": frames,
+        "NONE": action_counts.get("NONE", 0),
+        "HEAL": action_counts.get("HEAL", 0),
+        "RETREAT": action_counts.get("RETREAT", 0),
+        "TAKE_COVER": action_counts.get("TAKE_COVER", 0),
+        "TAKE_HIGH_GROUND": action_counts.get("TAKE_HIGH_GROUND", 0),
+        "PUSH": action_counts.get("PUSH", 0),
+    }
 
 
 def _create_video_writer(path: str, width: int, height: int, fps: float):
@@ -508,7 +426,7 @@ def _format_display_lines(candidates: list[Decision], max_lines: int) -> list[st
     limit = max(1, int(max_lines))
     out: list[str] = []
     for d in candidates[:limit]:
-        out.append(f"{d.action.value} | {d.reason}")
+        out.append(format_instruction_line(d.action, d.reason))
     return out
 
 

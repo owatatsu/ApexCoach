@@ -47,7 +47,7 @@ class ThresholdConfig:
     heal_stationary_frames: int = 4
     retreat_lowhp_stationary_frames: int = 3
     movement_score_threshold: float = 0.045
-    low_ground_confidence_min: float = 0.65
+    low_ground_confidence_min: float = 0.55
     exposed_confidence_min: float = 0.65
 
 

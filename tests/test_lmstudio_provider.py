@@ -41,7 +41,10 @@ def test_lmstudio_provider_success(tmp_path, monkeypatch) -> None:
     )
     provider = LMStudioProvider(cfg)
 
+    seen = {"body": None}
+
     def _urlopen(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode("utf-8"))
         return FakeResponse(
             {
                 "choices": [
@@ -58,9 +61,38 @@ def test_lmstudio_provider_success(tmp_path, monkeypatch) -> None:
     result = provider.generate_advice(
         state=_state(),
         candidate_actions=[Action.RETREAT, Action.NONE],
+        context={
+            "timestamp": 1.0,
+            "decision_trigger": "damage_spike",
+            "rule_decision": {
+                "action": "RETREAT",
+                "reason": "High incoming damage in last 1s.",
+                "confidence": 0.9,
+            },
+            "candidate_details": [
+                {
+                    "action": "RETREAT",
+                    "reason": "High incoming damage in last 1s.",
+                    "confidence": 0.9,
+                },
+                {
+                    "action": "NONE",
+                    "reason": "No strong signal.",
+                    "confidence": 0.5,
+                },
+            ],
+        },
     )
     assert result is not None
     assert result.action == Action.RETREAT
+    assert seen["body"] is not None
+    messages = seen["body"]["messages"]
+    user_payload = json.loads(messages[1]["content"])
+    assert user_payload["state"]["total_hp_shield"] == 0.7
+    assert user_payload["state"]["vitals_confidence"] == 1.0
+    assert user_payload["rule_decision"]["action"] == "RETREAT"
+    assert user_payload["candidate_details"][0]["confidence"] == 0.9
+    assert user_payload["request_context"]["decision_trigger"] == "damage_spike"
 
 
 def test_lmstudio_provider_timeout_returns_none(tmp_path, monkeypatch) -> None:

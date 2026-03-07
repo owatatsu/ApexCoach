@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from apexcoach.config import OverlayConfig
+from apexcoach.display_text import action_label, format_instruction_line, is_llm_label
 from apexcoach.models import Action
 
 try:
@@ -64,7 +65,7 @@ class OverlayRenderer:
         llm_line = self._resolve_llm_message(timestamp=timestamp, llm_message=llm_message)
         draw_lines = list(lines)
         if draw_lines and llm_line:
-            draw_lines.append(f"LLM | {llm_line}")
+            draw_lines.append(f"補足 | {llm_line}")
 
         if self.c.debug_show_rois and roi_boxes:
             out = _draw_roi_debug_overlay(out, self.c, roi_boxes)
@@ -107,7 +108,7 @@ class OverlayRenderer:
                 self._hold_until_ts = timestamp + hold_seconds
 
         if not lines and action != Action.NONE:
-            lines = [f"{action.value} | {reason}"]
+            lines = [format_instruction_line(action, reason)]
             self._active_lines = lines
             if timestamp is not None:
                 self._hold_until_ts = timestamp + hold_seconds
@@ -388,17 +389,20 @@ def _load_pillow_font(size_px: int):
 
 def _line_color(line: str) -> tuple[int, int, int]:
     action_token = line.split("|", 1)[0].strip()
-    if action_token == Action.RETREAT.value:
+    if action_token in {Action.RETREAT.value, action_label(Action.RETREAT)}:
         return (60, 80, 240)
-    if action_token == Action.TAKE_COVER.value:
+    if action_token in {Action.TAKE_COVER.value, action_label(Action.TAKE_COVER)}:
         return (90, 210, 245)
-    if action_token == Action.TAKE_HIGH_GROUND.value:
+    if action_token in {
+        Action.TAKE_HIGH_GROUND.value,
+        action_label(Action.TAKE_HIGH_GROUND),
+    }:
         return (230, 200, 90)
-    if action_token == Action.HEAL.value:
+    if action_token in {Action.HEAL.value, action_label(Action.HEAL)}:
         return (80, 200, 120)
-    if action_token == Action.PUSH.value:
+    if action_token in {Action.PUSH.value, action_label(Action.PUSH)}:
         return (240, 180, 40)
-    if action_token == "LLM":
+    if is_llm_label(action_token):
         return (220, 220, 255)
     return (220, 220, 220)
 
