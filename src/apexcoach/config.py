@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ class FrequencyConfig:
 class ThresholdConfig:
     low_total_hp_shield: float = 0.45
     heal_total_hp_shield: float = 0.65
+    critical_heal_total_hp_shield: float = 0.35
+    broken_shield_heal_hp_pct: float = 0.55
     push_min_total_hp_shield: float = 0.95
     high_damage_1s: float = 0.35
     high_damage_3s: float = 0.55
@@ -103,7 +106,7 @@ class RealtimeConfig:
 @dataclass(slots=True)
 class LoggingConfig:
     enabled: bool = True
-    path: str = "logs/session.jsonl"
+    path: str = "logs/session_{timestamp}.jsonl"
     include_reason: bool = True
 
 
@@ -111,8 +114,11 @@ class LoggingConfig:
 class LlmConfig:
     enabled: bool = False
     provider: str = "lmstudio"
-    model: str = "qwen3.5-9b-instruct"
-    model_name: str = "qwen3.5-9b-instruct"
+    model: str = ""
+    model_name: str = ""
+    model_names: list[str] = field(default_factory=list)
+    offline_review_model_name: str = ""
+    offline_review_model_names: list[str] = field(default_factory=list)
     base_url: str = "http://127.0.0.1:1234/v1"
     api_key: str = "lm-studio"
     timeout_seconds: float = 45.0  # offline review path
@@ -133,8 +139,9 @@ class LlmConfig:
     advice_enabled: bool = True
     frame_reasoning_enabled: bool = False
     offline_review_enabled: bool = True
-    offline_review_output: str = "logs/coach_review.md"
+    offline_review_output: str = "logs/coach_review_{timestamp}.md"
     offline_review_max_events: int = 16
+    offline_review_max_tokens: int = 1024
     offline_review_prompt_max_chars: int = 12000
     offline_review_reason_max_chars: int = 96
     offline_review_language: str = "ja"
@@ -199,6 +206,11 @@ def load_config(path: str | Path | None) -> ApexCoachConfig:
 
     _merge_dataclass(config, parsed)
     return config
+
+
+def format_run_timestamp(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return current.strftime("%Y%m%d_%H%M%S")
 
 
 def _merge_dataclass(target: Any, data: dict[str, Any]) -> None:

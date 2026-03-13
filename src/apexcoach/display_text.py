@@ -21,6 +21,7 @@ _REASON_LABELS: dict[str, str] = {
     "Under fire in exposed area. Move behind cover.": "開けた場所で撃たれています。遮蔽へ移動してください。",
     "Under fire from lower position. Take higher ground.": "不利な低所で撃ち合っています。高所を取りましょう。",
     "Safe window and low HP+Shield.": "安全な隙があり、HPとシールドが低いです。",
+    "Critical low resources in a safe window.": "安全な隙があり、瀕死かシールド破壊状態です。",
     "Enemy knock advantage with healthy team.": "敵ノックの有利があり、味方の体力状況も良好です。",
 }
 

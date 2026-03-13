@@ -53,3 +53,19 @@ def test_parse_advice_truncates_reason() -> None:
     assert result.validated_ok is True
     assert result.reason is not None
     assert len(result.reason) <= 20
+
+
+def test_parse_advice_extracts_first_json_when_analysis_text_follows() -> None:
+    raw = (
+        '{"action":"NONE","reason":"No strong signal."}'
+        '<|end|><|start|>assistant<|channel|>analysis<|message|>'
+        "Need to output JSON only."
+    )
+    result = parse_advice_text(
+        raw_text=raw,
+        candidate_actions=[Action.NONE, Action.PUSH],
+        max_reason_chars=48,
+    )
+    assert result.validated_ok is True
+    assert result.action == Action.NONE
+    assert result.reason == "No strong signal."

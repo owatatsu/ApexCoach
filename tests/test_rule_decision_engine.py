@@ -186,6 +186,56 @@ def test_heal_blocked_while_moving() -> None:
     assert decision.action == Action.NONE
 
 
+def test_heal_when_critical_low_even_if_vitals_unreliable() -> None:
+    engine = RuleDecisionEngine(
+        ThresholdConfig(
+            heal_stationary_frames=4,
+            critical_heal_total_hp_shield=0.35,
+        )
+    )
+    state = GameState(
+        timestamp=17.5,
+        hp_pct=0.18,
+        shield_pct=0.0,
+        vitals_confidence=0.0,
+        stationary_frames=3,
+        allies_alive=3,
+        allies_down=0,
+        recent_damage_1s=0.0,
+        recent_damage_3s=0.0,
+        under_fire=False,
+        enemy_knock_recent=False,
+        ally_knock_recent=False,
+    )
+    decision = engine.decide(state)
+    assert decision.action == Action.HEAL
+
+
+def test_heal_when_shield_broken_and_hp_low() -> None:
+    engine = RuleDecisionEngine(
+        ThresholdConfig(
+            heal_stationary_frames=4,
+            broken_shield_heal_hp_pct=0.55,
+        )
+    )
+    state = GameState(
+        timestamp=17.6,
+        hp_pct=0.42,
+        shield_pct=0.0,
+        vitals_confidence=0.0,
+        stationary_frames=3,
+        allies_alive=3,
+        allies_down=0,
+        recent_damage_1s=0.0,
+        recent_damage_3s=0.0,
+        under_fire=False,
+        enemy_knock_recent=False,
+        ally_knock_recent=False,
+    )
+    decision = engine.decide(state)
+    assert decision.action == Action.HEAL
+
+
 def test_candidates_return_multiple_actions() -> None:
     engine = RuleDecisionEngine(
         ThresholdConfig(

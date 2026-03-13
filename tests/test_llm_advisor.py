@@ -87,6 +87,45 @@ def test_build_review_payload_extracts_timeline(tmp_path) -> None:
     assert payload["timeline"][0]["under_fire"] is True
 
 
+def test_build_review_payload_downsamples_timeline_across_full_session(tmp_path) -> None:
+    log_path = tmp_path / "session.jsonl"
+    rows = []
+    for i in range(8):
+        rows.append(
+            {
+                "timestamp": float(i * 10),
+                "frame_index": i,
+                "state": {
+                    "hp_pct": 0.8,
+                    "shield_pct": 0.5,
+                    "under_fire": bool(i % 2),
+                    "allies_alive": 3,
+                    "allies_down": 0,
+                },
+                "events": {"damage_delta": 0.1},
+                "decision": {"reason": f"reason-{i}"},
+                "arbiter": {"action": "TAKE_COVER", "emitted": True},
+            }
+        )
+    log_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = _build_review_payload(
+        log_path,
+        max_events=4,
+        reason_max_chars=96,
+        summary={"frames": 8},
+    )
+
+    assert payload is not None
+    timeline = payload["timeline"]
+    assert len(timeline) == 4
+    assert timeline[0]["t"] == 0.0
+    assert timeline[-1]["t"] == 70.0
+
+
 def test_generate_offline_review_writes_fallback_when_ollama_unavailable(
     monkeypatch, tmp_path
 ) -> None:
@@ -159,7 +198,7 @@ def test_generate_offline_review_lmstudio_success(monkeypatch, tmp_path) -> None
         def read(self):
             return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
 
-    expected_model_id = "qwen2.5-14b-instruct-q4_k_m"
+    expected_model_id = "qwen3.5-9b"
 
     def _urlopen(req, **kwargs):
         url = req.full_url
@@ -168,6 +207,7 @@ def test_generate_offline_review_lmstudio_success(monkeypatch, tmp_path) -> None
         if url.endswith("/v1/chat/completions"):
             body = json.loads(req.data.decode("utf-8"))
             assert body["model"] == expected_model_id
+            assert body["max_tokens"] == 1024
             return FakeResponse(
                 {
                     "choices": [
@@ -198,10 +238,12 @@ def test_generate_offline_review_lmstudio_success(monkeypatch, tmp_path) -> None
         LlmConfig(
             enabled=True,
             provider="lmstudio",
-            model="qwen2.5-14b-instruct-q4_k_m.gguf",
+            model="gpt-oss-swallow-20b",
+            offline_review_model_name="qwen3.5-9b",
             base_url="http://127.0.0.1:1234",
             offline_review_enabled=True,
             offline_review_output=str(out_path),
+            offline_review_language="en",
         )
     )
     generated = advisor.generate_offline_review(log_path, summary={"frames": 1})

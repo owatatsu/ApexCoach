@@ -8,7 +8,7 @@ from apexcoach.models import Action
 @dataclass(slots=True)
 class LLMProviderConfig:
     base_url: str = "http://127.0.0.1:1234/v1"
-    model_name: str = "qwen3.5-9b-instruct"
+    model_name: str = ""
     timeout_ms: int = 300
     temperature: float = 0.1
     max_tokens: int = 64

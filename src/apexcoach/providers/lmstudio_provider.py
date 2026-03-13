@@ -22,6 +22,7 @@ class LMStudioProvider(BaseLLMProvider):
     def __init__(self, config: LLMProviderConfig) -> None:
         super().__init__(config)
         self._base_url = _normalize_base_url(config.base_url)
+        self._resolved_model_name: str | None = None
         self._consecutive_failures = 0
         self._disabled_until_monotonic = 0.0
         self._last_disabled_log_at = 0.0
@@ -126,7 +127,7 @@ class LMStudioProvider(BaseLLMProvider):
                     reason=parsed.reason,
                     request_id=request_id,
                     provider_name=self.name(),
-                    model_name=self.config.model_name,
+                    model_name=self._resolve_model_name(),
                     latency_ms=latency_ms,
                     raw_response=_truncate(raw_text, self.config.max_raw_response_chars),
                 )
@@ -183,7 +184,7 @@ class LMStudioProvider(BaseLLMProvider):
         messages: list[dict[str, str]],
     ) -> tuple[str, str | None, bool]:
         body = {
-            "model": self.config.model_name,
+            "model": self._resolve_model_name(),
             "messages": messages,
             "temperature": float(self.config.temperature),
             "max_tokens": int(self.config.max_tokens),
@@ -245,6 +246,45 @@ class LMStudioProvider(BaseLLMProvider):
         clean = path if path.startswith("/") else f"/{path}"
         return f"{base}{clean}"
 
+    def _resolve_model_name(self) -> str:
+        if self._resolved_model_name:
+            return self._resolved_model_name
+
+        configured = (self.config.model_name or "").strip()
+        if configured:
+            self._resolved_model_name = configured
+            return configured
+
+        model_ids = self._fetch_model_ids()
+        resolved = model_ids[0] if model_ids else ""
+        self._resolved_model_name = resolved
+        self.config.model_name = resolved
+        return resolved
+
+    def _fetch_model_ids(self) -> list[str]:
+        req = request.Request(
+            self._endpoint("/models"),
+            headers=self._headers(),
+            method="GET",
+        )
+        try:
+            with request.urlopen(req, timeout=max(0.05, self.config.timeout_ms / 1000.0)) as resp:
+                raw = resp.read().decode("utf-8")
+            payload = json.loads(raw)
+            data = payload.get("data")
+            if not isinstance(data, list):
+                return []
+            out: list[str] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    out.append(model_id.strip())
+            return out
+        except (error.URLError, error.HTTPError, json.JSONDecodeError, TimeoutError, OSError):
+            return []
+
     def _record_failure(self, hard: bool = False) -> None:
         if hard:
             self._disabled_until_monotonic = time.monotonic() + float(self.config.disable_seconds)
@@ -273,7 +313,7 @@ class LMStudioProvider(BaseLLMProvider):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "request_id": request_id,
             "provider": self.name(),
-            "model_name": self.config.model_name,
+            "model_name": self._resolve_model_name(),
             "candidate_actions": [a.value for a in candidate_actions],
             "state_summary": {
                 "hp_pct": round(state.hp_pct, 3),

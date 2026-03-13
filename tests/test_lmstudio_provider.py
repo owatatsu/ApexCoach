@@ -255,3 +255,40 @@ def test_lmstudio_provider_timeout_reason_inside_urlerror(tmp_path, monkeypatch)
     text = log_path.read_text(encoding="utf-8")
     assert '"timed_out": true' in text
     assert '"error_type": "timeout"' in text
+
+
+def test_lmstudio_provider_auto_selects_first_model_when_blank(tmp_path, monkeypatch) -> None:
+    cfg = LLMProviderConfig(
+        base_url="http://127.0.0.1:1234/v1",
+        model_name="",
+        request_log_path=str(tmp_path / "llm_req.jsonl"),
+    )
+    provider = LMStudioProvider(cfg)
+    seen = {"model": ""}
+
+    def _urlopen(req, timeout=None):
+        if req.full_url.endswith("/models"):
+            return FakeResponse({"data": [{"id": "qwen3.5-9b"}]})
+        body = json.loads(req.data.decode("utf-8"))
+        seen["model"] = body["model"]
+        return FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"action":"NONE","reason":"No strong signal."}'
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("apexcoach.providers.lmstudio_provider.request.urlopen", _urlopen)
+    result = provider.generate_advice(
+        state=_state(),
+        candidate_actions=[Action.NONE, Action.RETREAT],
+    )
+
+    assert result is not None
+    assert seen["model"] == "qwen3.5-9b"
+    assert result.model_name == "qwen3.5-9b"

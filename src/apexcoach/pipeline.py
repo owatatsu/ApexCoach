@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from queue import Full, Queue
 from threading import Event, Thread
@@ -9,7 +10,7 @@ from typing import Any, Iterator
 
 from apexcoach.action_arbiter import ActionArbiter
 from apexcoach.capture_service import ScreenCaptureService, VideoCaptureService
-from apexcoach.config import ApexCoachConfig
+from apexcoach.config import ApexCoachConfig, format_run_timestamp
 from apexcoach.display_text import format_instruction_line, localize_reason
 from apexcoach.event_detector import EventDetector
 from apexcoach.llm_advisor import LlmAdvisor
@@ -273,6 +274,7 @@ class OfflinePipeline:
         if not video_path:
             raise ValueError("Offline input_video is required.")
         _configure_opencv_threads(self.config.performance.opencv_threads)
+        _resolve_run_artifact_paths(self.config)
 
         session = _PipelineSession(self.config)
         prefetch_stream: PrefetchFrameStream | None = None
@@ -325,6 +327,7 @@ class RealtimePipeline:
 
     def run(self) -> dict[str, int]:
         _configure_opencv_threads(self.config.performance.opencv_threads)
+        _resolve_run_artifact_paths(self.config)
         session = _PipelineSession(self.config)
 
         region = _resolve_realtime_region(self.config)
@@ -455,6 +458,27 @@ def _configure_opencv_threads(thread_count: int) -> None:
     if thread_count <= 0:
         return
     cv2.setNumThreads(int(thread_count))
+
+
+def _resolve_run_artifact_paths(
+    config: ApexCoachConfig,
+    now: datetime | None = None,
+) -> None:
+    timestamp = format_run_timestamp(now)
+    config.logging.path = _expand_run_path(config.logging.path, timestamp)
+    config.llm.offline_review_output = _expand_run_path(
+        config.llm.offline_review_output,
+        timestamp,
+    )
+
+
+def _expand_run_path(path: str, timestamp: str) -> str:
+    value = str(path or "").strip()
+    if not value:
+        return value
+    if "{timestamp}" in value:
+        return value.replace("{timestamp}", timestamp)
+    return value
 
 
 _SENTINEL = object()

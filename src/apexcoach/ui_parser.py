@@ -297,25 +297,67 @@ def _estimate_color_bar_ratio(
     if cv2 is None or np is None or roi.size == 0:
         return None, 0.0
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    bright = cv2.inRange(hsv, (0, 0, 150), (180, 110, 255))
-    if target == "hp":
-        # HP is often white when healthy; include white + red damage tint.
-        white = cv2.inRange(hsv, (0, 0, 160), (180, 80, 255))
-        mask1 = cv2.inRange(hsv, (0, 70, 50), (12, 255, 255))
-        mask2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
-        red = cv2.bitwise_or(mask1, mask2)
-        mask = cv2.bitwise_or(white, red)
-    else:
-        # Shield color varies by tier (white/blue/purple/gold/red), so keep broad.
-        blue_purple = cv2.inRange(hsv, (90, 50, 45), (155, 255, 255))
-        warm = cv2.inRange(hsv, (0, 70, 70), (40, 255, 255))
-        mask = cv2.bitwise_or(bright, cv2.bitwise_or(blue_purple, warm))
+    focus = _extract_bar_focus_region(roi)
+    hsv = cv2.cvtColor(focus, cv2.COLOR_BGR2HSV)
+    mask = _build_bar_mask(hsv, target=target)
+    mask = _denoise_bar_mask(mask)
 
     # Keep mostly contiguous left-to-right fill and ignore scattered UI noise.
-    ratio = _left_fill_ratio(mask, min_col_occupancy=0.23, max_gap=4)
+    gap = max(2, focus.shape[1] // 50)
+    ratio = _left_fill_ratio(mask, min_col_occupancy=0.28, max_gap=gap)
     confidence = _bar_confidence(mask, ratio=ratio)
+    if ratio <= 0.02:
+        ratio = 0.0
+        confidence = max(confidence, _empty_bar_confidence(focus, mask))
+    elif ratio >= 0.98:
+        ratio = 1.0
     return min(1.0, max(0.0, ratio)), confidence
+
+
+def _extract_bar_focus_region(roi: "np.ndarray") -> "np.ndarray":
+    if np is None or roi.size == 0:
+        return roi
+
+    height, width = roi.shape[:2]
+    if height < 6 or width < 6:
+        return roi
+
+    y1 = max(0, int(round(height * 0.2)))
+    y2 = min(height, int(round(height * 0.8)))
+    x1 = max(0, int(round(width * 0.01)))
+    x2 = min(width, int(round(width * 0.99)))
+    if y2 <= y1 or x2 <= x1:
+        return roi
+    return roi[y1:y2, x1:x2]
+
+
+def _build_bar_mask(hsv: "np.ndarray", target: str) -> "np.ndarray":
+    white = cv2.inRange(hsv, (0, 0, 170), (180, 70, 255))
+
+    if target == "hp":
+        red1 = cv2.inRange(hsv, (0, 90, 60), (12, 255, 255))
+        red2 = cv2.inRange(hsv, (170, 90, 60), (180, 255, 255))
+        return cv2.bitwise_or(white, cv2.bitwise_or(red1, red2))
+
+    blue_purple = cv2.inRange(hsv, (95, 70, 60), (155, 255, 255))
+    gold = cv2.inRange(hsv, (14, 80, 90), (38, 255, 255))
+    red1 = cv2.inRange(hsv, (0, 100, 70), (10, 255, 255))
+    red2 = cv2.inRange(hsv, (170, 100, 70), (180, 255, 255))
+    warm = cv2.bitwise_or(gold, cv2.bitwise_or(red1, red2))
+    return cv2.bitwise_or(white, cv2.bitwise_or(blue_purple, warm))
+
+
+def _denoise_bar_mask(mask: "np.ndarray") -> "np.ndarray":
+    if cv2 is None:
+        return mask
+
+    height, width = mask.shape[:2]
+    kernel_w = max(2, width // 40)
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(2, kernel_w // 2), 1))
+    cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, open_kernel)
+    return cleaned
 
 
 def _left_fill_ratio(mask: "np.ndarray", min_col_occupancy: float, max_gap: int) -> float:
@@ -356,8 +398,26 @@ def _bar_confidence(mask: "np.ndarray", ratio: float) -> float:
 
     # Good bar: dense prefix, sparse suffix.
     sep = max(0.0, min(1.0, prefix_mean - suffix_mean))
-    conf = 0.55 * max(0.0, min(1.0, prefix_mean)) + 0.45 * sep
+    fill_fraction = float((mask > 0).mean()) if mask.size else 0.0
+    conf = (
+        0.45 * max(0.0, min(1.0, prefix_mean))
+        + 0.35 * sep
+        + 0.20 * max(0.0, min(1.0, fill_fraction * 2.5))
+    )
     return max(0.0, min(1.0, conf))
+
+
+def _empty_bar_confidence(roi: "np.ndarray", mask: "np.ndarray") -> float:
+    if np is None or roi.size == 0 or mask.size == 0:
+        return 0.0
+
+    fill_fraction = float((mask > 0).mean())
+    if fill_fraction > 0.03:
+        return 0.0
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    darkness = 1.0 - min(1.0, float(gray.mean()) / 90.0)
+    return max(0.0, min(0.45, 0.18 + darkness * 0.27))
 
 
 def _as_opt_float(value: Any) -> float | None:

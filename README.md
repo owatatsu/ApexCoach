@@ -36,13 +36,17 @@ pip install -e .[dev]
 apexcoach --video path/to/apex_recording.mp4 --config config/apexcoach.example.yaml
 ```
 
+Offline input supports typical H.264 MP4 files directly. AV1 input is also
+supported via automatic `ffmpeg` fallback when `ffmpeg`/`ffprobe` are available
+on your PATH.
+
 With log and overlay video output:
 
 ```bash
 apexcoach ^
   --video path/to/apex_recording.mp4 ^
   --config config/apexcoach.example.yaml ^
-  --log logs/session.jsonl ^
+  --log logs/session_{timestamp}.jsonl ^
   --output-video output/overlay.mp4
 ```
 
@@ -62,7 +66,10 @@ Enable in config:
 llm:
   enabled: true
   provider: "lmstudio"
-  model_name: "qwen3.5-9b-instruct"
+  model_name: ""  # optional: legacy single-model setting for realtime advice
+  model_names: []  # optional: if empty, try loaded LM Studio models in order for realtime advice
+  offline_review_model_name: ""  # optional: legacy single-model setting for offline review
+  offline_review_model_names: []  # optional: if empty, try loaded LM Studio models in order for offline review
   base_url: "http://127.0.0.1:1234/v1"
   api_key: "lm-studio"
   timeout_ms: 300
@@ -76,15 +83,19 @@ llm:
   llm_max_tokens: 64
   advice_enabled: true
   offline_review_enabled: true
-  offline_review_output: "logs/coach_review.md"
+  offline_review_output: "logs/coach_review_{timestamp}.md"
+  offline_review_max_tokens: 1024
 ```
 
 Then run normal offline/realtime pipeline.
 - Rule engine stays primary.
 - LLM is event-driven, low-frequency helper.
+- If multiple models are configured, ApexCoach tries them in order until one succeeds.
+- If no model list is configured, ApexCoach uses the model order reported by LM Studio.
 - Provider failures always fall back to rule decisions.
 - Per-request logs are saved to `logs/llm_requests.jsonl`.
-- Offline review markdown is saved to `logs/coach_review.md`.
+- Session logs default to `logs/session_{timestamp}.jsonl`.
+- Offline review markdown defaults to `logs/coach_review_{timestamp}.md`.
 
 CLI override example:
 
@@ -94,9 +105,10 @@ apexcoach ^
   --config config/apexcoach.example.yaml ^
   --llm-enable ^
   --llm-provider lmstudio ^
-  --llm-model qwen3.5-9b-instruct ^
+  --llm-models gpt-oss-swallow-20b,qwen3.5-9b ^
+  --llm-review-models qwen3.5-9b,gpt-oss-swallow-20b ^
   --llm-base-url http://127.0.0.1:1234/v1 ^
-  --llm-review-output logs/coach_review.md
+  --llm-review-output logs/coach_review_{timestamp}.md
 ```
 
 Ollama can still be used by setting `llm.provider: "ollama"` and `llm.base_url: "http://127.0.0.1:11434"`.
@@ -169,6 +181,37 @@ Use `performance` in config for faster offline conversion:
 - `write_queue_size`: async writer buffer
 - `opencv_threads`: OpenCV internal threads (`0` keeps default)
 
+## Aim Diagnosis MVP Docs
+
+Planning docs for the recording-based aim diagnosis MVP live under
+`docs/aim_diagnosis/`.
+
+## Aim Diagnosis Run
+
+Prepare a clip definition JSON:
+
+```json
+{
+  "clips": [
+    {"clip_id": "clip_001", "start_sec": 35.0, "end_sec": 43.0, "note": "first fight"},
+    {"clip_id": "clip_002", "start_sec": 78.5, "end_sec": 85.0}
+  ]
+}
+```
+
+Run the diagnosis flow:
+
+```bash
+apexcoach ^
+  --aim-diagnosis ^
+  --video path/to/apex_recording.mp4 ^
+  --clips-json config/aim_clips.json ^
+  --aim-output logs/aim_diagnosis.json
+```
+
+The result JSON includes per-clip summaries, inferred labels, and a fixed
+training plan for the top issues.
+
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

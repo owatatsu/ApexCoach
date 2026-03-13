@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from apexcoach.models import FrameEvents, ParsedNotifications, ParsedStatus
+from apexcoach.vitals import combine_vitals_confidence
 
 
 class EventDetector:
@@ -21,7 +22,12 @@ class EventDetector:
     ) -> FrameEvents:
         damage_delta = 0.0
         current_total = _total_hp_shield(status)
-        vitals_conf = min(status.hp_confidence, status.shield_confidence)
+        vitals_conf = combine_vitals_confidence(
+            hp_pct=status.hp_pct,
+            shield_pct=status.shield_pct,
+            hp_confidence=status.hp_confidence,
+            shield_confidence=status.shield_confidence,
+        )
         reliable = vitals_conf >= self._vitals_confidence_min
 
         if reliable and current_total is not None and self._prev_total is not None:

@@ -112,20 +112,29 @@ def _parse_json_object(text: str) -> Any | None:
     raw = (text or "").strip()
     if not raw:
         return None
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(raw)
+        return decoder.decode(raw)
     except json.JSONDecodeError:
         pass
 
-    first = raw.find("{")
-    last = raw.rfind("}")
-    if 0 <= first < last:
-        snippet = raw[first : last + 1]
+    for start in _candidate_json_starts(raw):
         try:
-            return json.loads(snippet)
+            parsed, _ = decoder.raw_decode(raw[start:])
+            return parsed
         except json.JSONDecodeError:
-            return None
+            continue
     return None
+
+
+def _candidate_json_starts(text: str) -> list[int]:
+    starts: list[int] = []
+    for token in ('{"', "{", "["):
+        index = text.find(token)
+        if index >= 0 and index not in starts:
+            starts.append(index)
+    starts.sort()
+    return starts
 
 
 def _truncate_text(text: str, max_chars: int) -> str:

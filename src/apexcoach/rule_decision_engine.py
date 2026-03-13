@@ -27,6 +27,20 @@ class RuleDecisionEngine:
         stationary_for_lowhp_retreat = (
             state.stationary_frames >= self.t.retreat_lowhp_stationary_frames
         )
+        safe_to_heal = (
+            not state.under_fire and state.recent_damage_1s <= self.t.quiet_damage_1s
+        )
+        critical_heal_window = (
+            safe_to_heal
+            and state.stationary_frames >= max(1, self.t.heal_stationary_frames // 2)
+            and (
+                total <= self.t.critical_heal_total_hp_shield
+                or (
+                    state.shield_pct <= 0.05
+                    and state.hp_pct <= self.t.broken_shield_heal_hp_pct
+                )
+            )
+        )
 
         decisions: list[Decision] = []
 
@@ -103,16 +117,22 @@ class RuleDecisionEngine:
             vitals_reliable
             and streak_ready_for_heal
             and stationary_for_heal
-            and
-            not state.under_fire
+            and safe_to_heal
             and total <= self.t.heal_total_hp_shield
-            and state.recent_damage_1s <= self.t.quiet_damage_1s
         ):
             decisions.append(
                 Decision(
                 action=Action.HEAL,
                 reason="Safe window and low HP+Shield.",
                 confidence=0.8,
+                )
+            )
+        elif critical_heal_window:
+            decisions.append(
+                Decision(
+                    action=Action.HEAL,
+                    reason="Critical low resources in a safe window.",
+                    confidence=0.74,
                 )
             )
 

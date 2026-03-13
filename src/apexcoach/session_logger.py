@@ -16,7 +16,7 @@ class SessionLogger:
 
         if self.enabled:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = self.path.open("a", encoding="utf-8")
+            self._handle = self.path.open("w", encoding="utf-8")
 
     def close(self) -> None:
         if self._handle is not None:

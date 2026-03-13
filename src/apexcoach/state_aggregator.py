@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 
 from apexcoach.models import Action, FrameEvents, GameState, ParsedStatus, ParsedTactical
+from apexcoach.vitals import combine_vitals_confidence
 
 
 class StateAggregator:
@@ -57,7 +58,12 @@ class StateAggregator:
             self._hp_pct = status.hp_pct
         if status.shield_pct is not None:
             self._shield_pct = status.shield_pct
-        self._vitals_confidence = min(status.hp_confidence, status.shield_confidence)
+        self._vitals_confidence = combine_vitals_confidence(
+            hp_pct=status.hp_pct,
+            shield_pct=status.shield_pct,
+            hp_confidence=status.hp_confidence,
+            shield_confidence=status.shield_confidence,
+        )
         self._update_low_hp_streaks()
         if status.allies_alive is not None:
             self._allies_alive = status.allies_alive

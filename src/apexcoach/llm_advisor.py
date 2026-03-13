@@ -18,26 +18,29 @@ class LlmAdvisor:
         self.config = config
         self._last_advice_request_ts: float | None = None
         self._advice_in_flight = False
-        self._advice_provider = None
+        self._advice_providers = []
         if self.config.enabled and self.config.advice_enabled:
-            provider_cfg = LLMProviderConfig(
-                base_url=self.config.base_url,
-                model_name=self.config.model_name or self.config.model,
-                timeout_ms=int(self.config.timeout_ms),
-                temperature=float(self.config.temperature),
-                max_tokens=int(self.config.llm_max_tokens),
-                max_reason_chars=int(self.config.max_reason_chars),
-                max_raw_response_chars=int(self.config.max_raw_response_chars),
-                parse_retry_count=int(self.config.parse_retry_count),
-                failure_threshold=int(self.config.failure_threshold),
-                disable_seconds=float(self.config.disable_seconds),
-                request_log_path=self.config.request_log_path,
-                api_key=self.config.api_key,
-            )
-            try:
-                self._advice_provider = build_provider(self.config.provider, provider_cfg)
-            except ValueError:
-                self._advice_provider = None
+            for model_name in self._resolve_advice_model_candidates():
+                provider_cfg = LLMProviderConfig(
+                    base_url=self.config.base_url,
+                    model_name=model_name,
+                    timeout_ms=int(self.config.timeout_ms),
+                    temperature=float(self.config.temperature),
+                    max_tokens=int(self.config.llm_max_tokens),
+                    max_reason_chars=int(self.config.max_reason_chars),
+                    max_raw_response_chars=int(self.config.max_raw_response_chars),
+                    parse_retry_count=int(self.config.parse_retry_count),
+                    failure_threshold=int(self.config.failure_threshold),
+                    disable_seconds=float(self.config.disable_seconds),
+                    request_log_path=self.config.request_log_path,
+                    api_key=self.config.api_key,
+                )
+                try:
+                    self._advice_providers.append(
+                        build_provider(self.config.provider, provider_cfg)
+                    )
+                except ValueError:
+                    continue
 
     def maybe_explain(
         self,
@@ -69,7 +72,7 @@ class LlmAdvisor:
             not self.config.enabled
             or not self.config.advice_enabled
             or not run_now
-            or self._advice_provider is None
+            or not self._advice_providers
         ):
             return None, None
         if self._advice_in_flight:
@@ -93,16 +96,21 @@ class LlmAdvisor:
         self._advice_in_flight = True
         self._last_advice_request_ts = timestamp
         try:
-            result = self._advice_provider.generate_advice(
+            result = None
+            advice_context = _build_advice_context(
                 state=state,
-                candidate_actions=candidate_actions,
-                context=_build_advice_context(
-                    state=state,
-                    candidates=candidates,
-                    rule_decision=rule_decision,
-                    timestamp=timestamp,
-                ),
+                candidates=candidates,
+                rule_decision=rule_decision,
+                timestamp=timestamp,
             )
+            for provider in self._advice_providers:
+                result = provider.generate_advice(
+                    state=state,
+                    candidate_actions=candidate_actions,
+                    context=advice_context,
+                )
+                if result is not None:
+                    break
         finally:
             self._advice_in_flight = False
 
@@ -159,11 +167,25 @@ class LlmAdvisor:
             language=self.config.offline_review_language,
             max_chars=int(self.config.offline_review_prompt_max_chars),
         )
-        result, provider_error = self._call_provider(prompt)
+        review_model_names = self._resolve_review_model_candidates()
+        result, provider_error = self._call_provider_with_fallbacks(
+            prompt,
+            max_tokens=int(self.config.offline_review_max_tokens),
+            model_names=review_model_names,
+            require_meaningful_review=True,
+        )
         result, language_note = self._ensure_output_language(
             result=result,
             target_language=self.config.offline_review_language,
+            model_names=review_model_names,
+            max_tokens=int(self.config.offline_review_max_tokens),
         )
+        if not _has_meaningful_review_content(result):
+            result = None
+            provider_error = _merge_error(
+                provider_error,
+                "LLM returned empty review content.",
+            )
         provider_error = _merge_error(provider_error, language_note)
         rendered = _render_review_markdown(
             payload,
@@ -191,17 +213,59 @@ class LlmAdvisor:
                 return True
         return False
 
-    def _call_provider(self, prompt: str) -> tuple[dict[str, Any] | None, str | None]:
+    def _call_provider(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
         provider = (self.config.provider or "").strip().lower()
         if provider in {"ollama"}:
-            return self._call_ollama(prompt)
+            return self._call_ollama(prompt, max_tokens=max_tokens, model_name=model_name)
         if provider in {"lmstudio", "lm_studio", "openai"}:
-            return self._call_lmstudio(prompt)
+            return self._call_lmstudio(
+                prompt,
+                max_tokens=max_tokens,
+                model_name=model_name,
+            )
         return None, f"Unsupported llm.provider: {self.config.provider!r}"
 
-    def _call_ollama(self, prompt: str) -> tuple[dict[str, Any] | None, str | None]:
+    def _call_provider_with_fallbacks(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        model_names: list[str] | None = None,
+        require_meaningful_review: bool = False,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        candidates = model_names or [""]
+        last_error: str | None = None
+        for model_name in candidates:
+            result, err = self._call_provider(
+                prompt,
+                max_tokens=max_tokens,
+                model_name=model_name or None,
+            )
+            if result is not None:
+                if require_meaningful_review and not _has_meaningful_review_content(result):
+                    label = model_name or "<auto>"
+                    last_error = _merge_error(
+                        last_error,
+                        f"{label}: LLM returned empty review content.",
+                    )
+                    continue
+                return result, last_error
+            label = model_name or "<auto>"
+            last_error = _merge_error(last_error, f"{label}: {err}")
+        return None, last_error
+
+    def _call_ollama(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
         body = {
-            "model": self.config.model,
+            "model": (model_name or self.config.model or self.config.model_name),
             "prompt": prompt,
             "stream": False,
             "format": "json",
@@ -231,8 +295,54 @@ class LlmAdvisor:
         except (json.JSONDecodeError, error.URLError, TimeoutError, OSError):
             return None, "Ollama API request failed."
 
-    def _call_lmstudio(self, prompt: str) -> tuple[dict[str, Any] | None, str | None]:
-        model_id, model_note = self._resolve_lmstudio_model_id()
+    def _resolve_advice_model_candidates(self) -> list[str]:
+        configured = _resolve_model_candidates(
+            self.config.model_names,
+            self.config.model_name,
+            self.config.model,
+        )
+        if configured:
+            return configured
+        discovered = self._discover_provider_models()
+        if discovered:
+            return discovered
+        return [""]
+
+    def _resolve_review_model_candidates(self) -> list[str]:
+        configured = _resolve_model_candidates(
+            self.config.offline_review_model_names,
+            self.config.offline_review_model_name,
+        )
+        if configured:
+            return configured
+
+        advice_candidates = _resolve_model_candidates(
+            self.config.model_names,
+            self.config.model_name,
+            self.config.model,
+        )
+        if advice_candidates:
+            return advice_candidates
+
+        discovered = self._discover_provider_models()
+        if discovered:
+            return discovered
+        return [""]
+
+    def _discover_provider_models(self) -> list[str]:
+        provider = (self.config.provider or "").strip().lower()
+        if provider not in {"lmstudio", "lm_studio", "openai"}:
+            return []
+        model_ids, _ = self._fetch_lmstudio_model_ids()
+        return model_ids
+
+    def _call_lmstudio(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        model_id, model_note = self._resolve_lmstudio_model_id(model_name=model_name)
         base_body = {
             "model": model_id,
             "messages": [
@@ -246,7 +356,7 @@ class LlmAdvisor:
                 {"role": "user", "content": prompt},
             ],
             "temperature": float(self.config.temperature),
-            "max_tokens": int(self.config.llm_max_tokens),
+            "max_tokens": int(max_tokens or self.config.llm_max_tokens),
         }
         response_format = (self.config.lmstudio_response_format or "").strip().lower()
         format_body = dict(base_body)
@@ -295,12 +405,15 @@ class LlmAdvisor:
             first = choices[0]
             if not isinstance(first, dict):
                 return None, "LM Studio choices[0] is not an object."
+            finish_reason = str(first.get("finish_reason", "") or "").strip().lower()
             message = first.get("message", {})
             if not isinstance(message, dict):
                 return None, "LM Studio response message is not an object."
             content = _extract_chat_content(message.get("content"))
             parsed = _parse_json_object_text(content)
             if parsed is None:
+                if finish_reason == "length":
+                    return None, "LM Studio response was truncated (finish_reason=length)."
                 return None, "LM Studio message content was not valid JSON object text."
             return parsed, None
         except error.HTTPError as exc:
@@ -315,8 +428,11 @@ class LlmAdvisor:
         ):
             return None, "LM Studio API request failed."
 
-    def _resolve_lmstudio_model_id(self) -> tuple[str, str | None]:
-        configured = (self.config.model or "").strip()
+    def _resolve_lmstudio_model_id(
+        self,
+        model_name: str | None = None,
+    ) -> tuple[str, str | None]:
+        configured = (model_name or self.config.model or self.config.model_name).strip()
         model_ids, err = self._fetch_lmstudio_model_ids()
         if not model_ids:
             return configured, err
@@ -375,6 +491,8 @@ class LlmAdvisor:
         self,
         result: dict[str, Any] | None,
         target_language: str,
+        model_names: list[str] | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         if result is None:
             return None, None
@@ -385,7 +503,11 @@ class LlmAdvisor:
             return result, None
 
         prompt = _build_translation_prompt(result, target_language="ja")
-        translated, err = self._call_provider(prompt)
+        translated, err = self._call_provider_with_fallbacks(
+            prompt,
+            max_tokens=max_tokens,
+            model_names=model_names,
+        )
         if translated and _contains_japanese_text_in_json(translated):
             return translated, "LLM output translated to Japanese."
         return result, _merge_error("Japanese enforcement failed", err)
@@ -435,7 +557,7 @@ def _build_review_payload(
     under_fire_frames = 0
     low_resource_frames = 0
     questionable_emits = 0
-    event_rows: list[dict[str, Any]] = []
+    event_candidates: list[dict[str, Any]] = []
 
     limit = max(1, int(max_events))
 
@@ -478,8 +600,8 @@ def _build_review_payload(
             ):
                 questionable_emits += 1
 
-            if emitted and action != "NONE" and len(event_rows) < limit:
-                event_rows.append(
+            if emitted and action != "NONE":
+                event_candidates.append(
                     {
                         "t": round(ts, 2),
                         "action": action,
@@ -513,7 +635,7 @@ def _build_review_payload(
         "quality": {
             "questionable_emit_count": questionable_emits,
         },
-        "timeline": event_rows,
+        "timeline": _downsample_timeline_events(event_candidates, limit=limit),
     }
 
 
@@ -534,7 +656,11 @@ def _build_review_prompt(payload: dict[str, Any], language: str) -> str:
         '"next_focus":["string","..."],'
         '"timeline":[{"time_sec":number,"advice":"string"}]'
         "}\n"
-        "Keep each bullet concise and actionable.\n"
+        "Use exactly 1 short summary sentence.\n"
+        "Use at most 2 items each for strengths, improvements, and next_focus.\n"
+        "Use at most 6 timeline items.\n"
+        "Choose timeline items that cover the whole session from early, mid, and late phases when possible.\n"
+        "Keep each string concise and actionable.\n"
         f"INPUT_JSON={input_json}\n"
     )
 
@@ -685,16 +811,30 @@ def _lmstudio_json_schema_response_format() -> dict[str, Any]:
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string"},
-                    "strengths": {"type": "array", "items": {"type": "string"}},
-                    "improvements": {"type": "array", "items": {"type": "string"}},
-                    "next_focus": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string", "maxLength": 160},
+                    "strengths": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
+                    "improvements": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
+                    "next_focus": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string", "maxLength": 80},
+                    },
                     "timeline": {
                         "type": "array",
+                        "maxItems": 6,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "time_sec": {"type": "number"},
-                                "advice": {"type": "string"},
+                                "advice": {"type": "string", "maxLength": 96},
                             },
                             "required": ["time_sec", "advice"],
                             "additionalProperties": False,
@@ -720,6 +860,55 @@ def _truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3] + "..."
+
+
+def _has_meaningful_review_content(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+
+    summary = str(result.get("summary", "") or "").strip()
+    if summary:
+        return True
+
+    for key in ("strengths", "improvements", "next_focus"):
+        items = result.get(key, [])
+        if isinstance(items, list):
+            for item in items:
+                if str(item or "").strip():
+                    return True
+
+    timeline = result.get("timeline", [])
+    if isinstance(timeline, list):
+        for item in timeline:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("advice", "") or "").strip():
+                return True
+
+    return False
+
+
+def _downsample_timeline_events(
+    events: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not events:
+        return []
+    if len(events) <= limit:
+        return list(events)
+    if limit == 1:
+        return [events[0]]
+
+    selected: list[dict[str, Any]] = []
+    used_indexes: set[int] = set()
+    last_index = len(events) - 1
+    for slot in range(limit):
+        index = round(slot * last_index / (limit - 1))
+        if index in used_indexes:
+            continue
+        used_indexes.add(index)
+        selected.append(events[index])
+    return selected
 
 
 def _extract_chat_content(content: Any) -> str:
@@ -770,6 +959,23 @@ def _contains_japanese_char(text: str) -> bool:
         if 0x3400 <= code <= 0x4DBF:
             return True
     return False
+
+
+def _resolve_model_candidates(*groups: object) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        if isinstance(group, list):
+            values = group
+        else:
+            values = [group]
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+    return out
 
 
 def _normalize_model_name(name: str) -> str:

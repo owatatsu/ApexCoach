@@ -1,8 +1,15 @@
 from collections import Counter
+from datetime import datetime
 
+from apexcoach.config import ApexCoachConfig
 from apexcoach.display_text import format_instruction_line
 from apexcoach.models import Action
-from apexcoach.pipeline import RateGate, _build_summary, _to_overlay_llm_message
+from apexcoach.pipeline import (
+    RateGate,
+    _build_summary,
+    _resolve_run_artifact_paths,
+    _to_overlay_llm_message,
+)
 
 
 def test_rate_gate_respects_interval() -> None:
@@ -33,6 +40,26 @@ def test_build_summary_includes_all_actions() -> None:
 def test_to_overlay_llm_message_filters_internal_notes() -> None:
     assert _to_overlay_llm_message("llm_skip:rate_limited") is None
     assert _to_overlay_llm_message(" Use cover before healing ") == "Use cover before healing"
+
+
+def test_resolve_run_artifact_paths_expands_timestamp_placeholder() -> None:
+    cfg = ApexCoachConfig()
+
+    _resolve_run_artifact_paths(cfg, now=datetime(2026, 3, 13, 12, 34, 56))
+
+    assert cfg.logging.path == "logs/session_20260313_123456.jsonl"
+    assert cfg.llm.offline_review_output == "logs/coach_review_20260313_123456.md"
+
+
+def test_resolve_run_artifact_paths_keeps_explicit_paths_without_placeholder() -> None:
+    cfg = ApexCoachConfig()
+    cfg.logging.path = "logs/session.jsonl"
+    cfg.llm.offline_review_output = "logs/coach_review.md"
+
+    _resolve_run_artifact_paths(cfg, now=datetime(2026, 3, 13, 12, 34, 56))
+
+    assert cfg.logging.path == "logs/session.jsonl"
+    assert cfg.llm.offline_review_output == "logs/coach_review.md"
 
 
 def test_format_instruction_line_localizes_for_display() -> None:
