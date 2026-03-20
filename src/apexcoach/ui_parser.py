@@ -88,6 +88,10 @@ class SimpleUiParser:
     def __init__(self, telemetry: TelemetryReader | None = None) -> None:
         self.telemetry = telemetry
         self._prev_motion_gray = None
+        self._last_debug: dict[str, Any] = {}
+
+    def debug_snapshot(self) -> dict[str, Any]:
+        return dict(self._last_debug)
 
     def parse_status(
         self, packet: FramePacket, rois: dict[str, "np.ndarray"]
@@ -98,13 +102,19 @@ class SimpleUiParser:
         shield_pct = _as_opt_float(raw.get("shield_pct"))
         hp_conf = 1.0 if hp_pct is not None else 0.0
         shield_conf = 1.0 if shield_pct is not None else 0.0
+        hp_debug: dict[str, Any] = {"source": "telemetry" if hp_pct is not None else "missing"}
+        shield_debug: dict[str, Any] = {
+            "source": "telemetry" if shield_pct is not None else "missing"
+        }
         allies_alive = _as_opt_int(raw.get("allies_alive"))
         allies_down = _as_opt_int(raw.get("allies_down"))
 
         if hp_pct is None and "hp_bar" in rois:
-            hp_pct, hp_conf = self._estimate_hp(rois["hp_bar"])
+            hp_pct, hp_conf, hp_debug = self._estimate_hp(rois["hp_bar"])
         if shield_pct is None and "shield_bar" in rois:
-            shield_pct, shield_conf = self._estimate_shield(rois["shield_bar"])
+            shield_pct, shield_conf, shield_debug = self._estimate_shield(
+                rois["shield_bar"]
+            )
 
         if allies_alive is None and allies_down is not None:
             allies_alive = max(0, 3 - allies_down)
@@ -115,6 +125,19 @@ class SimpleUiParser:
             allies_alive = 3
         if allies_down is None:
             allies_down = 0
+
+        self._last_debug["status"] = {
+            "hp": {
+                **hp_debug,
+                "ratio": None if hp_pct is None else round(float(hp_pct), 3),
+                "confidence": round(float(hp_conf), 3),
+            },
+            "shield": {
+                **shield_debug,
+                "ratio": None if shield_pct is None else round(float(shield_pct), 3),
+                "confidence": round(float(shield_conf), 3),
+            },
+        }
 
         return ParsedStatus(
             hp_pct=hp_pct,
@@ -167,27 +190,66 @@ class SimpleUiParser:
         movement_score = _as_opt_float(
             _pick_first(raw, "movement_score", "motion_score")
         )
+        low_ground_debug: dict[str, Any] = {
+            "source": "telemetry"
+            if low_ground is not None or low_ground_conf is not None
+            else "missing"
+        }
+        exposed_debug: dict[str, Any] = {
+            "source": "telemetry"
+            if exposed is not None or exposed_conf is not None
+            else "missing"
+        }
+        movement_debug: dict[str, Any] = {
+            "source": "telemetry"
+            if is_moving is not None or movement_score is not None
+            else "missing"
+        }
 
         if low_ground is None or low_ground_conf is None:
-            est_low, est_low_conf = self._estimate_low_ground(packet.frame)
+            est_low, est_low_conf, low_ground_debug = self._estimate_low_ground(
+                packet.frame
+            )
             if low_ground is None:
                 low_ground = est_low
             if low_ground_conf is None:
                 low_ground_conf = est_low_conf
 
         if exposed is None or exposed_conf is None:
-            est_exp, est_exp_conf = self._estimate_exposed_no_cover(packet.frame)
+            est_exp, est_exp_conf, exposed_debug = self._estimate_exposed_no_cover(
+                packet.frame
+            )
             if exposed is None:
                 exposed = est_exp
             if exposed_conf is None:
                 exposed_conf = est_exp_conf
 
         if is_moving is None or movement_score is None:
-            est_moving, est_motion = self._estimate_movement(packet.frame)
+            est_moving, est_motion, movement_debug = self._estimate_movement(
+                packet.frame
+            )
             if is_moving is None:
                 is_moving = est_moving
             if movement_score is None:
                 movement_score = est_motion
+
+        self._last_debug["tactical"] = {
+            "low_ground": {
+                **low_ground_debug,
+                "active": low_ground,
+                "confidence": round(float(low_ground_conf or 0.0), 3),
+            },
+            "exposed": {
+                **exposed_debug,
+                "active": exposed,
+                "confidence": round(float(exposed_conf or 0.0), 3),
+            },
+            "movement": {
+                **movement_debug,
+                "active": is_moving,
+                "score": round(float(movement_score or 0.0), 3),
+            },
+        }
 
         return ParsedTactical(
             low_ground_disadvantage=low_ground,
@@ -212,15 +274,21 @@ class SimpleUiParser:
             frame_index=packet.frame_index, timestamp=packet.timestamp
         )
 
-    def _estimate_hp(self, roi: "np.ndarray") -> tuple[float | None, float]:
-        return _estimate_color_bar_ratio(roi, target="hp")
+    def _estimate_hp(
+        self, roi: "np.ndarray"
+    ) -> tuple[float | None, float, dict[str, Any]]:
+        return _estimate_color_bar(roi, target="hp")
 
-    def _estimate_shield(self, roi: "np.ndarray") -> tuple[float | None, float]:
-        return _estimate_color_bar_ratio(roi, target="shield")
+    def _estimate_shield(
+        self, roi: "np.ndarray"
+    ) -> tuple[float | None, float, dict[str, Any]]:
+        return _estimate_color_bar(roi, target="shield")
 
-    def _estimate_low_ground(self, frame: "np.ndarray") -> tuple[bool | None, float]:
+    def _estimate_low_ground(
+        self, frame: "np.ndarray"
+    ) -> tuple[bool | None, float, dict[str, Any]]:
         if cv2 is None or np is None or frame.size == 0:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         h, w = frame.shape[:2]
         cx1 = int(w * 0.33)
@@ -228,7 +296,7 @@ class SimpleUiParser:
         top = frame[int(h * 0.08) : int(h * 0.40), cx1:cx2]
         bottom = frame[int(h * 0.55) : int(h * 0.88), cx1:cx2]
         if top.size == 0 or bottom.size == 0:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         top_gray = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
         bottom_gray = cv2.cvtColor(bottom, cv2.COLOR_BGR2GRAY)
@@ -238,34 +306,51 @@ class SimpleUiParser:
         ratio = (top_edges + 1e-6) / (bottom_edges + 1e-6)
         # Looking up often produces richer geometry/edges in upper center.
         score = min(1.0, max(0.0, (ratio - 1.15) / 1.0))
+        debug = {
+            "source": "estimator",
+            "valid": True,
+            "top_edges": round(float(top_edges), 4),
+            "bottom_edges": round(float(bottom_edges), 4),
+            "edge_ratio": round(float(ratio), 4),
+            "score": round(float(score), 4),
+        }
         if score < 0.45:
-            return None, score
-        return True, score
+            return None, score, debug
+        return True, score, debug
 
     def _estimate_exposed_no_cover(
         self, frame: "np.ndarray"
-    ) -> tuple[bool | None, float]:
+    ) -> tuple[bool | None, float, dict[str, Any]]:
         if cv2 is None or np is None or frame.size == 0:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         h, w = frame.shape[:2]
         # Near player view: lower-center region where immediate cover usually appears.
         near = frame[int(h * 0.52) : int(h * 0.9), int(w * 0.2) : int(w * 0.8)]
         if near.size == 0:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         gray = cv2.cvtColor(near, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 60, 140).mean() / 255.0
         texture = float(np.std(gray) / 128.0)
         # Low edge + low texture tends to indicate open space.
         openness = max(0.0, min(1.0, 1.0 - (0.6 * edges + 0.4 * min(1.0, texture))))
+        debug = {
+            "source": "estimator",
+            "valid": True,
+            "edges": round(float(edges), 4),
+            "texture": round(float(texture), 4),
+            "openness": round(float(openness), 4),
+        }
         if openness < 0.5:
-            return None, openness
-        return True, openness
+            return None, openness, debug
+        return True, openness, debug
 
-    def _estimate_movement(self, frame: "np.ndarray") -> tuple[bool | None, float]:
+    def _estimate_movement(
+        self, frame: "np.ndarray"
+    ) -> tuple[bool | None, float, dict[str, Any]]:
         if cv2 is None or np is None or frame.size == 0:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         h, w = frame.shape[:2]
         y1 = int(h * 0.18)
@@ -273,7 +358,7 @@ class SimpleUiParser:
         x1 = int(w * 0.18)
         x2 = int(w * 0.82)
         if x2 <= x1 or y2 <= y1:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False}
 
         core = frame[y1:y2, x1:x2]
         gray = cv2.cvtColor(core, cv2.COLOR_BGR2GRAY)
@@ -283,19 +368,23 @@ class SimpleUiParser:
         prev = self._prev_motion_gray
         self._prev_motion_gray = gray
         if prev is None:
-            return None, 0.0
+            return None, 0.0, {"source": "estimator", "valid": False, "warmup": True}
 
         diff = cv2.absdiff(gray, prev)
         score = float(diff.mean() / 255.0)
         moving = score >= 0.045
-        return moving, max(0.0, min(1.0, score))
+        return moving, max(0.0, min(1.0, score)), {
+            "source": "estimator",
+            "valid": True,
+            "score": round(float(score), 4),
+        }
 
 
-def _estimate_color_bar_ratio(
+def _estimate_color_bar(
     roi: "np.ndarray", target: str
-) -> tuple[float | None, float]:
+) -> tuple[float | None, float, dict[str, Any]]:
     if cv2 is None or np is None or roi.size == 0:
-        return None, 0.0
+        return None, 0.0, {"source": "roi", "valid": False}
 
     focus = _extract_bar_focus_region(roi)
     hsv = cv2.cvtColor(focus, cv2.COLOR_BGR2HSV)
@@ -311,7 +400,24 @@ def _estimate_color_bar_ratio(
         confidence = max(confidence, _empty_bar_confidence(focus, mask))
     elif ratio >= 0.98:
         ratio = 1.0
-    return min(1.0, max(0.0, ratio)), confidence
+    normalized_ratio = min(1.0, max(0.0, ratio))
+    debug = {
+        "source": "roi",
+        "valid": True,
+        "focus": focus,
+        "mask": mask,
+        "fill_fraction": round(float((mask > 0).mean()), 4),
+        "ratio": round(float(normalized_ratio), 4),
+        "confidence": round(float(confidence), 4),
+    }
+    return normalized_ratio, confidence, debug
+
+
+def _estimate_color_bar_ratio(
+    roi: "np.ndarray", target: str
+) -> tuple[float | None, float]:
+    ratio, confidence, _ = _estimate_color_bar(roi, target=target)
+    return ratio, confidence
 
 
 def _extract_bar_focus_region(roi: "np.ndarray") -> "np.ndarray":

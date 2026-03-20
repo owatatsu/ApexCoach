@@ -161,6 +161,13 @@ ROI debug overlay (to verify scan regions):
 - `overlay.debug_show_roi_labels: true`
 - For realtime visual check, use `overlay.window_mode: "frame"` during debugging
 
+Detection debug dump (to inspect bar masks and parser confidence):
+
+- `detection_debug.enabled: true`
+- `detection_debug.output_dir: "logs/detection_debug_{timestamp}"`
+- `detection_debug.dump_interval_frames: 15`
+- The dump writes ROI images, mask images, and `metadata.jsonl` for sampled frames
+
 Recommended local models:
 
 - Text coaching: `qwen3.5-9b-instruct` (LM Studio)

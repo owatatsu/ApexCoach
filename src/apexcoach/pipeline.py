@@ -11,6 +11,7 @@ from typing import Any, Iterator
 from apexcoach.action_arbiter import ActionArbiter
 from apexcoach.capture_service import ScreenCaptureService, VideoCaptureService
 from apexcoach.config import ApexCoachConfig, format_run_timestamp
+from apexcoach.detection_debug import DetectionDebugDumper
 from apexcoach.display_text import format_instruction_line, localize_reason
 from apexcoach.event_detector import EventDetector
 from apexcoach.llm_advisor import LlmAdvisor
@@ -102,14 +103,27 @@ class _PipelineSession:
         self.event_detector = EventDetector(
             vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
             min_damage_event_delta=self.config.thresholds.min_damage_event_delta,
+            damage_confirmation_frames=self.config.thresholds.damage_confirmation_frames,
+            damage_burst_multiplier=self.config.thresholds.damage_burst_multiplier,
+            damage_confirmation_window_seconds=self.config.thresholds.damage_confirmation_window_seconds,
+            partial_damage_floor_ratio=self.config.thresholds.partial_damage_floor_ratio,
         )
         self.state_aggregator = StateAggregator(
             knock_recent_seconds=self.config.thresholds.knock_recent_seconds,
             under_fire_damage_1s=self.config.thresholds.under_fire_damage_1s,
+            under_fire_release_damage_1s=self.config.thresholds.under_fire_release_damage_1s,
             retreat_low_total_hp_shield=self.config.thresholds.low_total_hp_shield,
             heal_total_hp_shield=self.config.thresholds.heal_total_hp_shield,
             vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
             movement_score_threshold=self.config.thresholds.movement_score_threshold,
+            movement_release_score_threshold=self.config.thresholds.movement_release_score_threshold,
+            low_ground_confidence_min=self.config.thresholds.low_ground_confidence_min,
+            low_ground_confidence_off=self.config.thresholds.low_ground_confidence_off,
+            exposed_confidence_min=self.config.thresholds.exposed_confidence_min,
+            exposed_confidence_off=self.config.thresholds.exposed_confidence_off,
+            vitals_ema_alpha=self.config.thresholds.vitals_ema_alpha,
+            tactical_ema_alpha=self.config.thresholds.tactical_ema_alpha,
+            movement_ema_alpha=self.config.thresholds.movement_ema_alpha,
         )
         self.decision_engine = RuleDecisionEngine(self.config.thresholds)
         self.arbiter = ActionArbiter(self.config.arbiter)
@@ -119,6 +133,7 @@ class _PipelineSession:
             path=self.config.logging.path,
             enabled=self.config.logging.enabled,
         )
+        self.debug_dumper = DetectionDebugDumper(self.config.detection_debug)
 
         self.ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
         self.ocr_gate = RateGate(self.config.frequencies.ocr_fps)
@@ -209,6 +224,16 @@ class _PipelineSession:
             arbiter=runtime.arbiter_result,
             llm_reason=log_llm_reason,
         )
+        self.debug_dumper.maybe_dump(
+            packet=packet,
+            rois=rois,
+            roi_boxes=roi_boxes,
+            status=runtime.status,
+            tactical=runtime.tactical,
+            state=state,
+            events=events,
+            parser_debug=self.ui_parser.debug_snapshot(),
+        )
         return output_frame
 
     def write_output(self, frame: Any) -> None:
@@ -237,6 +262,7 @@ class _PipelineSession:
             self.writer = None
         self.overlay.close()
         self.logger.close()
+        self.debug_dumper.close()
 
     def _update_decision(self, state: GameState, timestamp: float) -> str | None:
         runtime = self.runtime
@@ -466,6 +492,10 @@ def _resolve_run_artifact_paths(
 ) -> None:
     timestamp = format_run_timestamp(now)
     config.logging.path = _expand_run_path(config.logging.path, timestamp)
+    config.detection_debug.output_dir = _expand_run_path(
+        config.detection_debug.output_dir,
+        timestamp,
+    )
     config.llm.offline_review_output = _expand_run_path(
         config.llm.offline_review_output,
         timestamp,

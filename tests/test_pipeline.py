@@ -48,17 +48,20 @@ def test_resolve_run_artifact_paths_expands_timestamp_placeholder() -> None:
     _resolve_run_artifact_paths(cfg, now=datetime(2026, 3, 13, 12, 34, 56))
 
     assert cfg.logging.path == "logs/session_20260313_123456.jsonl"
+    assert cfg.detection_debug.output_dir == "logs/detection_debug_20260313_123456"
     assert cfg.llm.offline_review_output == "logs/coach_review_20260313_123456.md"
 
 
 def test_resolve_run_artifact_paths_keeps_explicit_paths_without_placeholder() -> None:
     cfg = ApexCoachConfig()
     cfg.logging.path = "logs/session.jsonl"
+    cfg.detection_debug.output_dir = "logs/detection_debug"
     cfg.llm.offline_review_output = "logs/coach_review.md"
 
     _resolve_run_artifact_paths(cfg, now=datetime(2026, 3, 13, 12, 34, 56))
 
     assert cfg.logging.path == "logs/session.jsonl"
+    assert cfg.detection_debug.output_dir == "logs/detection_debug"
     assert cfg.llm.offline_review_output == "logs/coach_review.md"
 
 

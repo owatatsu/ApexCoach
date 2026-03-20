@@ -45,13 +45,24 @@ class ThresholdConfig:
     ally_isolated_alive_count: int = 1
     knock_recent_seconds: float = 2.5
     under_fire_damage_1s: float = 0.03
+    under_fire_release_damage_1s: float = 0.015
     vitals_confidence_min: float = 0.3
     low_hp_consecutive_frames: int = 3
     heal_stationary_frames: int = 4
     retreat_lowhp_stationary_frames: int = 3
     movement_score_threshold: float = 0.045
+    movement_release_score_threshold: float = 0.03
     low_ground_confidence_min: float = 0.55
+    low_ground_confidence_off: float = 0.4
     exposed_confidence_min: float = 0.65
+    exposed_confidence_off: float = 0.5
+    damage_confirmation_frames: int = 2
+    damage_burst_multiplier: float = 2.0
+    damage_confirmation_window_seconds: float = 0.35
+    partial_damage_floor_ratio: float = 0.45
+    vitals_ema_alpha: float = 0.55
+    tactical_ema_alpha: float = 0.4
+    movement_ema_alpha: float = 0.45
 
 
 @dataclass(slots=True)
@@ -108,6 +119,16 @@ class LoggingConfig:
     enabled: bool = True
     path: str = "logs/session_{timestamp}.jsonl"
     include_reason: bool = True
+
+
+@dataclass(slots=True)
+class DetectionDebugConfig:
+    enabled: bool = False
+    output_dir: str = "logs/detection_debug_{timestamp}"
+    dump_interval_frames: int = 15
+    max_frames: int = 120
+    save_roi_images: bool = True
+    save_mask_images: bool = True
 
 
 @dataclass(slots=True)
@@ -175,6 +196,7 @@ class ApexCoachConfig:
     offline: OfflineConfig = field(default_factory=OfflineConfig)
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    detection_debug: DetectionDebugConfig = field(default_factory=DetectionDebugConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     rois: dict[str, Roi] = field(default_factory=default_rois)

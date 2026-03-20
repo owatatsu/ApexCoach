@@ -20,13 +20,24 @@ thresholds:
   ally_isolated_alive_count: 1
   knock_recent_seconds: 2.5
   under_fire_damage_1s: 0.03
+  under_fire_release_damage_1s: 0.015
   vitals_confidence_min: 0.3
   low_hp_consecutive_frames: 4
   heal_stationary_frames: 4
   retreat_lowhp_stationary_frames: 3
   movement_score_threshold: 0.045
+  movement_release_score_threshold: 0.03
   low_ground_confidence_min: 0.55
+  low_ground_confidence_off: 0.4
   exposed_confidence_min: 0.65
+  exposed_confidence_off: 0.5
+  damage_confirmation_frames: 2
+  damage_burst_multiplier: 2.0
+  damage_confirmation_window_seconds: 0.35
+  partial_damage_floor_ratio: 0.45
+  vitals_ema_alpha: 0.55
+  tactical_ema_alpha: 0.4
+  movement_ema_alpha: 0.45
 
 arbiter:
   same_action_cooldown_seconds: 2.0
@@ -73,6 +84,14 @@ logging:
   enabled: true
   path: "logs/session_{timestamp}.jsonl"
   include_reason: true
+
+detection_debug:
+  enabled: false
+  output_dir: "logs/detection_debug_{timestamp}"
+  dump_interval_frames: 15
+  max_frames: 120
+  save_roi_images: true
+  save_mask_images: true
 
 llm:
   enabled: true
