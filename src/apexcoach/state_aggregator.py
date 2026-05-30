@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 
-from apexcoach.models import Action, FrameEvents, GameState, ParsedStatus, ParsedTactical
+from apexcoach.models import (
+    Action,
+    EnemyState,
+    FrameEvents,
+    GameState,
+    ParsedStatus,
+    ParsedTactical,
+)
 from apexcoach.vitals import combine_vitals_confidence
 
 
@@ -65,6 +72,7 @@ class StateAggregator:
         self._exposed_no_cover = False
         self._exposed_confidence = 0.0
         self._under_fire = False
+        self._enemy_state = EnemyState()
         self._last_action = Action.NONE
         self._last_action_time: float | None = None
 
@@ -73,6 +81,7 @@ class StateAggregator:
         status: ParsedStatus,
         events: FrameEvents,
         tactical: ParsedTactical | None = None,
+        enemy_state: EnemyState | None = None,
     ) -> GameState:
         timestamp = events.timestamp
         if status.hp_pct is not None:
@@ -166,6 +175,8 @@ class StateAggregator:
             on_threshold=self.under_fire_damage_1s,
             off_threshold=self.under_fire_release_damage_1s,
         )
+        if enemy_state is not None:
+            self._enemy_state = enemy_state
 
         return GameState(
             timestamp=timestamp,
@@ -189,6 +200,14 @@ class StateAggregator:
             low_ground_confidence=self._low_ground_confidence,
             exposed_no_cover=self._exposed_no_cover,
             exposed_confidence=self._exposed_confidence,
+            enemy_available=self._enemy_state.available,
+            enemy_count=self._enemy_state.enemy_count,
+            enemy_left=self._enemy_state.enemy_left,
+            enemy_center=self._enemy_state.enemy_center,
+            enemy_right=self._enemy_state.enemy_right,
+            tracked_enemy_ids=list(self._enemy_state.tracked_enemy_ids),
+            enemy_movement_trend=self._enemy_state.movement_trend,
+            enemy_summary_lines=list(self._enemy_state.summary_lines),
             last_action=self._last_action,
             last_action_time=self._last_action_time,
         )

@@ -2,6 +2,7 @@ frequencies:
   capture_fps: 10
   ui_parse_fps: 10
   ocr_fps: 2
+  yolo_fps: 5
   state_fps: 10
   decision_fps: 10
   llm_fps: 1
@@ -22,6 +23,7 @@ thresholds:
   under_fire_damage_1s: 0.03
   under_fire_release_damage_1s: 0.015
   vitals_confidence_min: 0.3
+  damage_event_vitals_confidence_min: 0.6
   low_hp_consecutive_frames: 4
   heal_stationary_frames: 4
   retreat_lowhp_stationary_frames: 3
@@ -67,6 +69,17 @@ overlay:
   debug_roi_alpha: 0.35
   debug_show_roi_labels: true
 
+voice:
+  enabled: false
+  backend: "pyttsx3"
+  voice_id: ""
+  rate: 190
+  volume: 1.0
+  include_reason: true
+  min_interval_seconds: 2.0
+  same_text_cooldown_seconds: 6.0
+  max_queue_size: 2
+
 offline:
   input_video: ""
   output_video: ""
@@ -92,6 +105,21 @@ detection_debug:
   max_frames: 120
   save_roi_images: true
   save_mask_images: true
+
+yolo:
+  enabled: false
+  model_name: "yolov8n.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  max_detections: 12
+  imgsz: 960
+  device: ""
+  class_names: ["person"]
+  track_enabled: true
+  tracker: "bytetrack.yaml"
+  persist_tracks: true
+  history_size: 8
+  debug_draw: false
 
 llm:
   enabled: true

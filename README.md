@@ -28,6 +28,8 @@ It is advice-only.
 ```bash
 pip install -e .
 pip install -e .[dev]
+pip install -e .[yolo]
+pip install -e .[voice]
 ```
 
 ## Offline MVP Run
@@ -161,6 +163,23 @@ ROI debug overlay (to verify scan regions):
 - `overlay.debug_show_roi_labels: true`
 - For realtime visual check, use `overlay.window_mode: "frame"` during debugging
 
+Interactive ROI calibration from a video frame:
+
+```bash
+apexcoach ^
+  --calibrate-rois ^
+  --video path/to/apex_recording.mp4 ^
+  --config config/apexcoach.example.yaml ^
+  --calibration-frame-sec 12.5 ^
+  --calibration-output config/apexcoach.rois.yaml ^
+  --calibration-snapshot logs/roi_calibration.png
+```
+
+- Drag each ROI in the OpenCV window and release the mouse to confirm it
+- Press `c` or Esc to skip a ROI and keep the existing configured box if one exists
+- The output YAML contains `rois`, `roi_reference_width`, and `roi_reference_height`
+- Copy or merge the generated values into your active config
+
 Detection debug dump (to inspect bar masks and parser confidence):
 
 - `detection_debug.enabled: true`
@@ -168,16 +187,71 @@ Detection debug dump (to inspect bar masks and parser confidence):
 - `detection_debug.dump_interval_frames: 15`
 - The dump writes ROI images, mask images, and `metadata.jsonl` for sampled frames
 
+Spoken advice:
+
+- Install `pyttsx3` support with `pip install -e .[voice]`
+- Set `voice.enabled: true` for queued non-blocking speech output
+- `voice.include_reason: false` keeps callouts to short action labels
+- `voice.min_interval_seconds` and `voice.same_text_cooldown_seconds` limit repeated audio
+- CLI overrides: `--voice-enable`, `--voice-rate 210`, `--voice-action-only`
+
 Recommended local models:
 
 - Text coaching: `qwen3.5-9b-instruct` (LM Studio)
 - Vision extension later: `qwen2.5vl:7b`
+
+## YOLO Enemy Detection
+
+Optional YOLO-based enemy detection can be enabled without changing the default
+pipeline behavior.
+
+Config example:
+
+```yaml
+frequencies:
+  yolo_fps: 5
+
+yolo:
+  enabled: true
+  model_name: "yolov8n.pt"
+  confidence_threshold: 0.25
+  class_names: ["person"]
+  track_enabled: true
+  debug_draw: true
+```
+
+Notes:
+
+- Install the optional dependency with `pip install -e .[yolo]`
+- If YOLO fails to load or inference raises, ApexCoach logs a warning and continues
+- When enabled, LLM payloads include enemy summary lines such as `enemy_count=2`
+- `yolo.debug_draw: true` overlays boxes and `track_id` labels for debugging
 
 ## Tests
 
 ```bash
 pytest -q -p no:cacheprovider
 ```
+
+## Session HTML Report
+
+Generate a standalone HTML report from an existing session log:
+
+```bash
+apexcoach --session-report logs/session_20260313_195645.jsonl --report-output logs/session_report.html
+```
+
+Or generate it immediately after an offline/realtime run:
+
+```bash
+apexcoach ^
+  --video path/to/apex_recording.mp4 ^
+  --log logs/session_{timestamp}.jsonl ^
+  --report-output logs/session_report.html
+```
+
+The report includes HP/shield timeline, action counts, emitted coaching events,
+under-fire ratio, and low-resource ratio.
 
 ## Performance Tuning
 

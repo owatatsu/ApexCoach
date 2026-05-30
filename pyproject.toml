@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+yolo = ["ultralytics>=8.3"]
+voice = ["pyttsx3>=2.90"]
 
 [project.scripts]
 apexcoach = "apexcoach.cli:main"

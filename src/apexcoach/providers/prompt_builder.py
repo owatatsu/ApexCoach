@@ -62,6 +62,14 @@ def build_user_payload(
             "decision_trigger": context.get("decision_trigger"),
         },
     }
+    if state.enemy_available:
+        payload["state"]["enemy_count"] = state.enemy_count
+        payload["state"]["enemy_left"] = state.enemy_left
+        payload["state"]["enemy_center"] = state.enemy_center
+        payload["state"]["enemy_right"] = state.enemy_right
+        payload["state"]["tracked_enemy_ids"] = list(state.tracked_enemy_ids)
+        payload["state"]["enemy_movement_trend"] = state.enemy_movement_trend
+        payload["enemy_summary"] = list(state.enemy_summary_lines)
     return json.dumps(payload, ensure_ascii=False)
 
 

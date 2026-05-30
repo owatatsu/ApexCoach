@@ -59,6 +59,31 @@ class FrameEvents:
 
 
 @dataclass(slots=True)
+class EnemyDetection:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    confidence: float
+    class_id: int
+    class_name: str
+    track_id: int | None = None
+
+
+@dataclass(slots=True)
+class EnemyState:
+    available: bool = False
+    detections: list[EnemyDetection] = field(default_factory=list)
+    enemy_count: int = 0
+    enemy_left: int = 0
+    enemy_center: int = 0
+    enemy_right: int = 0
+    tracked_enemy_ids: list[int] = field(default_factory=list)
+    movement_trend: str = ""
+    summary_lines: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class GameState:
     timestamp: float
     hp_pct: float = 1.0
@@ -81,6 +106,14 @@ class GameState:
     low_ground_confidence: float = 0.0
     exposed_no_cover: bool = False
     exposed_confidence: float = 0.0
+    enemy_available: bool = False
+    enemy_count: int = 0
+    enemy_left: int = 0
+    enemy_center: int = 0
+    enemy_right: int = 0
+    tracked_enemy_ids: list[int] = field(default_factory=list)
+    enemy_movement_trend: str = ""
+    enemy_summary_lines: list[str] = field(default_factory=list)
     last_action: Action = Action.NONE
     last_action_time: float | None = None
 

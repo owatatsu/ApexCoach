@@ -47,6 +47,10 @@ def test_realtime_defaults_show_window() -> None:
         llm_review_models=None,
         llm_base_url=None,
         llm_review_output=None,
+        yolo_enable=False,
+        yolo_model=None,
+        yolo_conf=None,
+        yolo_debug_draw=False,
     )
     _apply_cli_overrides(cfg, args)
     assert cfg.overlay.show_window is True
@@ -73,6 +77,10 @@ def test_llm_cli_overrides() -> None:
         llm_review_models=None,
         llm_base_url="http://127.0.0.1:1234",
         llm_review_output="logs/custom_review.md",
+        yolo_enable=True,
+        yolo_model="yolov8n.pt",
+        yolo_conf=0.33,
+        yolo_debug_draw=True,
     )
     _apply_cli_overrides(cfg, args)
     assert cfg.llm.enabled is True
@@ -84,6 +92,10 @@ def test_llm_cli_overrides() -> None:
     assert cfg.llm.offline_review_model_names == ["qwen3.5-9b"]
     assert cfg.llm.base_url == "http://127.0.0.1:1234"
     assert cfg.llm.offline_review_output == "logs/custom_review.md"
+    assert cfg.yolo.enabled is True
+    assert cfg.yolo.model_name == "yolov8n.pt"
+    assert cfg.yolo.confidence_threshold == 0.33
+    assert cfg.yolo.debug_draw is True
 
 
 def test_validate_inputs_rejects_invalid_llm_provider() -> None:
@@ -115,6 +127,16 @@ def test_parser_accepts_aim_diagnosis_flags() -> None:
             "qwen3.5-9b,qwen2.5-14b",
             "--aim-output",
             "out/result.json",
+            "--yolo-enable",
+            "--yolo-model",
+            "yolov8n.pt",
+            "--yolo-conf",
+            "0.4",
+            "--yolo-debug-draw",
+            "--voice-enable",
+            "--voice-rate",
+            "210",
+            "--voice-action-only",
         ]
     )
     assert args.aim_diagnosis is True
@@ -124,6 +146,13 @@ def test_parser_accepts_aim_diagnosis_flags() -> None:
     assert args.llm_review_model == "qwen3.5-9b"
     assert args.llm_review_models == "qwen3.5-9b,qwen2.5-14b"
     assert args.aim_output == "out/result.json"
+    assert args.yolo_enable is True
+    assert args.yolo_model == "yolov8n.pt"
+    assert args.yolo_conf == 0.4
+    assert args.yolo_debug_draw is True
+    assert args.voice_enable is True
+    assert args.voice_rate == 210
+    assert args.voice_action_only is True
 
 
 def test_llm_cli_plural_model_overrides() -> None:
@@ -147,6 +176,10 @@ def test_llm_cli_plural_model_overrides() -> None:
         llm_review_models="qwen3.5-9b,qwen2.5-14b",
         llm_base_url=None,
         llm_review_output=None,
+        yolo_enable=False,
+        yolo_model=None,
+        yolo_conf=None,
+        yolo_debug_draw=False,
     )
 
     _apply_cli_overrides(cfg, args)

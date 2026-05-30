@@ -8,6 +8,11 @@ from typing import Any
 from apexcoach.aim_diagnosis import AimDiagnosisService, ClipRange
 from apexcoach.config import ApexCoachConfig, load_config
 from apexcoach.pipeline import OfflinePipeline, RealtimePipeline
+from apexcoach.roi_calibration import (
+    DEFAULT_CALIBRATION_ROIS,
+    calibrate_rois_from_video,
+)
+from apexcoach.session_report import default_report_output_path, write_session_report
 
 try:
     import cv2
@@ -24,6 +29,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--aim-diagnosis",
         action="store_true",
         help="Run recording-based aim diagnosis instead of the tactical pipeline.",
+    )
+    parser.add_argument(
+        "--calibrate-rois",
+        action="store_true",
+        help="Interactively select HUD ROIs from a video frame and write a ROI YAML snippet.",
+    )
+    parser.add_argument(
+        "--calibration-output",
+        type=str,
+        default="config/apexcoach.rois.yaml",
+        help="Output YAML path for --calibrate-rois.",
+    )
+    parser.add_argument(
+        "--calibration-frame-sec",
+        type=float,
+        default=0.0,
+        help="Video timestamp to use for ROI calibration.",
+    )
+    parser.add_argument(
+        "--calibration-rois",
+        type=str,
+        default=",".join(DEFAULT_CALIBRATION_ROIS),
+        help="Comma-separated ROI names to select.",
+    )
+    parser.add_argument(
+        "--calibration-snapshot",
+        type=str,
+        default=None,
+        help="Optional PNG path showing calibrated ROI boxes.",
+    )
+    parser.add_argument(
+        "--session-report",
+        type=str,
+        default=None,
+        help="Generate an HTML report from an existing session JSONL log and exit.",
+    )
+    parser.add_argument(
+        "--report-output",
+        type=str,
+        default=None,
+        help="HTML report output path. With a normal run, generates a report from the run log.",
     )
     parser.add_argument(
         "--realtime",
@@ -73,6 +119,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable overlay rendering",
     )
     parser.add_argument(
+        "--voice-enable",
+        action="store_true",
+        help="Enable non-blocking spoken tactical advice.",
+    )
+    parser.add_argument(
+        "--voice-rate",
+        type=int,
+        default=None,
+        help="Override spoken advice rate.",
+    )
+    parser.add_argument(
+        "--voice-action-only",
+        action="store_true",
+        help="Read only the action label and omit spoken reason text.",
+    )
+    parser.add_argument(
         "--llm-enable",
         action="store_true",
         help="Enable local LLM features (offline review).",
@@ -120,6 +182,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output path for offline review markdown.",
     )
     parser.add_argument(
+        "--yolo-enable",
+        action="store_true",
+        help="Enable YOLO-based enemy detection.",
+    )
+    parser.add_argument(
+        "--yolo-model",
+        type=str,
+        default=None,
+        help="Ultralytics YOLO model path or model name.",
+    )
+    parser.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=None,
+        help="YOLO confidence threshold.",
+    )
+    parser.add_argument(
+        "--yolo-debug-draw",
+        action="store_true",
+        help="Draw YOLO detections on the output frame for debugging.",
+    )
+    parser.add_argument(
         "--clips-json",
         type=str,
         default=None,
@@ -137,6 +221,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.session_report:
+        report_path = _run_session_report(args.session_report, args.report_output)
+        print("Session report generated.")
+        print(f"report={Path(report_path).expanduser().resolve()}")
+        return
+
+    if args.calibrate_rois:
+        config = load_config(args.config)
+        _apply_cli_overrides(config, args)
+        _validate_roi_calibration_inputs(config, parser)
+        result = _run_roi_calibration(config, args)
+        print("ROI calibration finished.")
+        print(
+            f"frame={result.frame_width}x{result.frame_height} "
+            f"rois={','.join(sorted(result.rois))} "
+            f"saved={Path(args.calibration_output).expanduser().resolve()}"
+        )
+        return
 
     if args.aim_diagnosis:
         _validate_aim_diagnosis_inputs(args, parser)
@@ -169,6 +272,12 @@ def main(argv: list[str] | None = None) -> None:
         f"TAKE_HIGH_GROUND={summary['TAKE_HIGH_GROUND']} "
         f"PUSH={summary['PUSH']}"
     )
+    if args.report_output:
+        report_path = write_session_report(
+            log_path=config.logging.path,
+            output_path=args.report_output,
+        )
+        print(f"report={Path(report_path).expanduser().resolve()}")
 
 
 def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> None:
@@ -197,6 +306,12 @@ def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> N
         config.overlay.show_window = True
     if args.disable_overlay:
         config.overlay.enabled = False
+    if getattr(args, "voice_enable", False):
+        config.voice.enabled = True
+    if getattr(args, "voice_rate", None) is not None:
+        config.voice.rate = max(80, int(args.voice_rate))
+    if getattr(args, "voice_action_only", False):
+        config.voice.include_reason = False
     if args.llm_enable:
         config.llm.enabled = True
     if args.llm_provider:
@@ -223,6 +338,14 @@ def _apply_cli_overrides(config: ApexCoachConfig, args: argparse.Namespace) -> N
         config.llm.base_url = args.llm_base_url
     if args.llm_review_output:
         config.llm.offline_review_output = args.llm_review_output
+    if args.yolo_enable:
+        config.yolo.enabled = True
+    if args.yolo_model:
+        config.yolo.model_name = args.yolo_model
+    if args.yolo_conf is not None:
+        config.yolo.confidence_threshold = max(0.0, min(1.0, float(args.yolo_conf)))
+    if args.yolo_debug_draw:
+        config.yolo.debug_draw = True
 
 
 def _validate_inputs(
@@ -258,6 +381,17 @@ def _validate_inputs(
             parser.error(
                 f"Telemetry file does not exist: {telemetry_path.resolve()}"
             )
+
+
+def _validate_roi_calibration_inputs(
+    config: ApexCoachConfig,
+    parser: argparse.ArgumentParser,
+) -> None:
+    if not config.offline.input_video:
+        parser.error("--video is required for --calibrate-rois.")
+    video_path = Path(config.offline.input_video).expanduser()
+    if not video_path.exists():
+        parser.error(f"Video file does not exist: {video_path.resolve()}")
 
 
 def _parse_region(region: str) -> tuple[int, int, int, int]:
@@ -353,6 +487,22 @@ def _write_aim_result(path: Path, result: dict[str, Any]) -> None:
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _run_roi_calibration(config: ApexCoachConfig, args: argparse.Namespace):
+    return calibrate_rois_from_video(
+        video_path=config.offline.input_video,
+        config=config,
+        roi_names=_parse_csv_models(args.calibration_rois),
+        frame_sec=float(args.calibration_frame_sec or 0.0),
+        output_path=args.calibration_output,
+        snapshot_path=args.calibration_snapshot,
+    )
+
+
+def _run_session_report(log_path: str, output_path: str | None) -> str:
+    resolved_output = output_path or str(default_report_output_path(log_path))
+    return write_session_report(log_path=log_path, output_path=resolved_output)
 
 
 def _probe_video_duration_seconds(video_path: Path) -> float:

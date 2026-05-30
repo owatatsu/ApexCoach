@@ -136,3 +136,75 @@ def test_large_damage_burst_is_emitted_immediately() -> None:
     )
 
     assert ev.damage_delta >= 0.099
+
+
+def test_damage_is_ignored_when_vitals_confidence_is_below_damage_floor() -> None:
+    det = EventDetector(
+        vitals_confidence_min=0.6,
+        min_damage_event_delta=0.04,
+    )
+    notes = ParsedNotifications()
+
+    det.detect(
+        status=ParsedStatus(
+            hp_pct=0.9,
+            shield_pct=0.9,
+            hp_confidence=0.45,
+            shield_confidence=0.45,
+        ),
+        notifications=notes,
+        timestamp=0.0,
+    )
+    ev = det.detect(
+        status=ParsedStatus(
+            hp_pct=0.82,
+            shield_pct=0.9,
+            hp_confidence=0.45,
+            shield_confidence=0.45,
+        ),
+        notifications=notes,
+        timestamp=0.1,
+    )
+
+    assert ev.damage_delta == 0.0
+
+
+def test_damage_reference_resets_after_unreliable_frame() -> None:
+    det = EventDetector(
+        vitals_confidence_min=0.6,
+        min_damage_event_delta=0.04,
+    )
+    notes = ParsedNotifications()
+
+    det.detect(
+        status=ParsedStatus(
+            hp_pct=0.9,
+            shield_pct=0.9,
+            hp_confidence=0.9,
+            shield_confidence=0.9,
+        ),
+        notifications=notes,
+        timestamp=0.0,
+    )
+    det.detect(
+        status=ParsedStatus(
+            hp_pct=0.7,
+            shield_pct=0.9,
+            hp_confidence=0.2,
+            shield_confidence=0.2,
+        ),
+        notifications=notes,
+        timestamp=0.1,
+    )
+    ev = det.detect(
+        status=ParsedStatus(
+            hp_pct=0.7,
+            shield_pct=0.9,
+            hp_confidence=0.9,
+            shield_confidence=0.9,
+        ),
+        notifications=notes,
+        timestamp=0.2,
+    )
+
+    assert ev.damage_delta == 0.0

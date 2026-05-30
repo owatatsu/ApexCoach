@@ -13,12 +13,14 @@ from apexcoach.capture_service import ScreenCaptureService, VideoCaptureService
 from apexcoach.config import ApexCoachConfig, format_run_timestamp
 from apexcoach.detection_debug import DetectionDebugDumper
 from apexcoach.display_text import format_instruction_line, localize_reason
+from apexcoach.enemy_detector import YoloEnemyDetector, draw_enemy_debug
 from apexcoach.event_detector import EventDetector
 from apexcoach.llm_advisor import LlmAdvisor
 from apexcoach.models import (
     Action,
     ArbiterResult,
     Decision,
+    EnemyState,
     FramePacket,
     GameState,
     ParsedNotifications,
@@ -31,6 +33,7 @@ from apexcoach.rule_decision_engine import RuleDecisionEngine
 from apexcoach.session_logger import SessionLogger
 from apexcoach.state_aggregator import StateAggregator
 from apexcoach.ui_parser import SimpleUiParser, TelemetryReader
+from apexcoach.voice_advisor import VoiceAdvisor
 
 try:
     import cv2
@@ -66,6 +69,7 @@ class _PipelineRuntime:
         )
     )
     tactical: ParsedTactical = field(default_factory=ParsedTactical)
+    enemy_state: EnemyState = field(default_factory=EnemyState)
     decision: Decision = field(
         default_factory=lambda: Decision(
             action=Action.NONE,
@@ -94,6 +98,7 @@ class _PipelineSession:
             telemetry_reader = TelemetryReader(self.config.offline.telemetry_jsonl)
 
         self.ui_parser = SimpleUiParser(telemetry=telemetry_reader)
+        self.enemy_detector = YoloEnemyDetector(self.config.yolo)
         self.roi_manager = RoiManager(
             self.config.rois,
             scale_to_frame=self.config.scale_rois_to_frame,
@@ -101,7 +106,7 @@ class _PipelineSession:
             reference_height=self.config.roi_reference_height,
         )
         self.event_detector = EventDetector(
-            vitals_confidence_min=self.config.thresholds.vitals_confidence_min,
+            vitals_confidence_min=self.config.thresholds.damage_event_vitals_confidence_min,
             min_damage_event_delta=self.config.thresholds.min_damage_event_delta,
             damage_confirmation_frames=self.config.thresholds.damage_confirmation_frames,
             damage_burst_multiplier=self.config.thresholds.damage_burst_multiplier,
@@ -128,6 +133,7 @@ class _PipelineSession:
         self.decision_engine = RuleDecisionEngine(self.config.thresholds)
         self.arbiter = ActionArbiter(self.config.arbiter)
         self.overlay = OverlayRenderer(self.config.overlay)
+        self.voice = VoiceAdvisor(self.config.voice)
         self.llm = LlmAdvisor(self.config.llm)
         self.logger = SessionLogger(
             path=self.config.logging.path,
@@ -137,6 +143,7 @@ class _PipelineSession:
 
         self.ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
         self.ocr_gate = RateGate(self.config.frequencies.ocr_fps)
+        self.yolo_gate = RateGate(self.config.frequencies.yolo_fps)
         self.decision_gate = RateGate(self.config.frequencies.decision_fps)
         self.llm_gate = RateGate(self.config.frequencies.llm_fps)
         self.overlay_gate = RateGate(self.config.frequencies.overlay_fps)
@@ -174,6 +181,13 @@ class _PipelineSession:
             runtime.status = self.ui_parser.parse_status(packet, rois)
             runtime.tactical = self.ui_parser.parse_tactical(packet, rois)
 
+        if self.yolo_gate.ready(packet.timestamp):
+            runtime.enemy_state = self.enemy_detector.infer(
+                packet.frame,
+                timestamp=packet.timestamp,
+                color_format="bgr",
+            )
+
         notifications = ParsedNotifications()
         if self.ocr_gate.ready(packet.timestamp):
             notifications = self.ui_parser.parse_notifications(packet, rois)
@@ -187,6 +201,7 @@ class _PipelineSession:
             status=runtime.status,
             events=events,
             tactical=runtime.tactical,
+            enemy_state=runtime.enemy_state,
         )
 
         if self.decision_gate.ready(packet.timestamp):
@@ -206,8 +221,10 @@ class _PipelineSession:
 
         output_frame = packet.frame
         if self.overlay_gate.ready(packet.timestamp):
+            if self.config.yolo.debug_draw:
+                output_frame = draw_enemy_debug(output_frame, runtime.enemy_state)
             output_frame = self.overlay.render(
-                frame=packet.frame,
+                frame=output_frame,
                 action=runtime.arbiter_result.action,
                 reason=localize_reason(runtime.decision.reason),
                 timestamp=packet.timestamp,
@@ -261,6 +278,7 @@ class _PipelineSession:
             self.writer.release()
             self.writer = None
         self.overlay.close()
+        self.voice.close()
         self.logger.close()
         self.debug_dumper.close()
 
@@ -281,6 +299,11 @@ class _PipelineSession:
             max_lines=self.config.overlay.max_lines,
         )
         runtime.arbiter_result = self.arbiter.arbitrate(runtime.decision, timestamp)
+        self.voice.maybe_speak(
+            decision=runtime.decision,
+            arbiter=runtime.arbiter_result,
+            timestamp=timestamp,
+        )
         _record_action_transition(
             state_aggregator=self.state_aggregator,
             state=state,

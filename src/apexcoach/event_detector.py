@@ -30,6 +30,7 @@ class EventDetector:
         self._pending_damage = 0.0
         self._pending_damage_frames = 0
         self._pending_damage_timestamp: float | None = None
+        self._prev_vitals_conf: float | None = None
 
     def detect(
         self,
@@ -45,11 +46,20 @@ class EventDetector:
             hp_confidence=status.hp_confidence,
             shield_confidence=status.shield_confidence,
         )
-        reliable = vitals_conf >= self._vitals_confidence_min
+        current_reliable = vitals_conf >= self._vitals_confidence_min
+        prev_reliable = (
+            self._prev_vitals_conf is not None
+            and self._prev_vitals_conf >= self._vitals_confidence_min
+        )
 
         self._expire_pending_damage(timestamp)
 
-        if reliable and current_total is not None and self._prev_total is not None:
+        if (
+            current_reliable
+            and prev_reliable
+            and current_total is not None
+            and self._prev_total is not None
+        ):
             raw_drop = max(0.0, self._prev_total - current_total)
             burst_threshold = self._min_damage_event_delta * self._damage_burst_multiplier
             if raw_drop >= burst_threshold:
@@ -71,9 +81,12 @@ class EventDetector:
             elif raw_drop <= 0.0:
                 self._expire_pending_damage(timestamp, force=False)
 
-        if reliable and current_total is not None:
+        if current_reliable and current_total is not None:
             self._prev_total = current_total
-        elif not reliable:
+            self._prev_vitals_conf = vitals_conf
+        else:
+            self._prev_total = None
+            self._prev_vitals_conf = None
             self._reset_pending_damage()
 
         return FrameEvents(

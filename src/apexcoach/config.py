@@ -25,6 +25,7 @@ class FrequencyConfig:
     capture_fps: int = 10
     ui_parse_fps: int = 10
     ocr_fps: int = 2
+    yolo_fps: int = 5
     state_fps: int = 10
     decision_fps: int = 10
     llm_fps: int = 1
@@ -47,6 +48,7 @@ class ThresholdConfig:
     under_fire_damage_1s: float = 0.03
     under_fire_release_damage_1s: float = 0.015
     vitals_confidence_min: float = 0.3
+    damage_event_vitals_confidence_min: float = 0.6
     low_hp_consecutive_frames: int = 3
     heal_stationary_frames: int = 4
     retreat_lowhp_stationary_frames: int = 3
@@ -98,6 +100,19 @@ class OverlayConfig:
 
 
 @dataclass(slots=True)
+class VoiceConfig:
+    enabled: bool = False
+    backend: str = "pyttsx3"
+    voice_id: str = ""
+    rate: int = 190
+    volume: float = 1.0
+    include_reason: bool = True
+    min_interval_seconds: float = 2.0
+    same_text_cooldown_seconds: float = 6.0
+    max_queue_size: int = 2
+
+
+@dataclass(slots=True)
 class OfflineConfig:
     input_video: str = ""
     output_video: str = ""
@@ -129,6 +144,23 @@ class DetectionDebugConfig:
     max_frames: int = 120
     save_roi_images: bool = True
     save_mask_images: bool = True
+
+
+@dataclass(slots=True)
+class YoloConfig:
+    enabled: bool = False
+    model_name: str = "yolov8n.pt"
+    confidence_threshold: float = 0.25
+    iou_threshold: float = 0.45
+    max_detections: int = 12
+    imgsz: int = 960
+    device: str = ""
+    class_names: list[str] = field(default_factory=lambda: ["person"])
+    track_enabled: bool = True
+    tracker: str = "bytetrack.yaml"
+    persist_tracks: bool = True
+    history_size: int = 8
+    debug_draw: bool = False
 
 
 @dataclass(slots=True)
@@ -193,10 +225,12 @@ class ApexCoachConfig:
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     arbiter: ArbiterConfig = field(default_factory=ArbiterConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     offline: OfflineConfig = field(default_factory=OfflineConfig)
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     detection_debug: DetectionDebugConfig = field(default_factory=DetectionDebugConfig)
+    yolo: YoloConfig = field(default_factory=YoloConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     rois: dict[str, Roi] = field(default_factory=default_rois)
