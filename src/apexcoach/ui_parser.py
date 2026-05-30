@@ -206,14 +206,18 @@ class SimpleUiParser:
             else "missing"
         }
 
+        low_ground_evidence: list[str] = []
         if low_ground is None or low_ground_conf is None:
             est_low, est_low_conf, low_ground_debug = self._estimate_low_ground(
-                packet.frame
+                packet.frame,
+                rois=rois,
+                telemetry=raw,
             )
             if low_ground is None:
                 low_ground = est_low
             if low_ground_conf is None:
                 low_ground_conf = est_low_conf
+        low_ground_evidence = list(low_ground_debug.get("evidence", []))
 
         if exposed is None or exposed_conf is None:
             est_exp, est_exp_conf, exposed_debug = self._estimate_exposed_no_cover(
@@ -238,6 +242,7 @@ class SimpleUiParser:
                 **low_ground_debug,
                 "active": low_ground,
                 "confidence": round(float(low_ground_conf or 0.0), 3),
+                "evidence": low_ground_evidence,
             },
             "exposed": {
                 **exposed_debug,
@@ -254,6 +259,7 @@ class SimpleUiParser:
         return ParsedTactical(
             low_ground_disadvantage=low_ground,
             low_ground_confidence=low_ground_conf or 0.0,
+            low_ground_evidence=low_ground_evidence,
             exposed_no_cover=exposed,
             exposed_confidence=exposed_conf or 0.0,
             is_moving=is_moving,
@@ -285,11 +291,16 @@ class SimpleUiParser:
         return _estimate_color_bar(roi, target="shield")
 
     def _estimate_low_ground(
-        self, frame: "np.ndarray"
+        self,
+        frame: "np.ndarray",
+        rois: dict[str, "np.ndarray"] | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> tuple[bool | None, float, dict[str, Any]]:
         if cv2 is None or np is None or frame.size == 0:
             return None, 0.0, {"source": "estimator", "valid": False}
 
+        rois = rois or {}
+        telemetry = telemetry or {}
         h, w = frame.shape[:2]
         cx1 = int(w * 0.33)
         cx2 = int(w * 0.67)
@@ -304,15 +315,42 @@ class SimpleUiParser:
         bottom_edges = cv2.Canny(bottom_gray, 70, 150).mean() / 255.0
 
         ratio = (top_edges + 1e-6) / (bottom_edges + 1e-6)
-        # Looking up often produces richer geometry/edges in upper center.
-        score = min(1.0, max(0.0, (ratio - 1.15) / 1.0))
+        edge_score = _clamp01((ratio - 1.15) / 1.0)
+        horizon_y_pct, horizon_conf, horizon_debug = _estimate_horizon_y_pct(frame)
+        horizon_score = _clamp01(((horizon_y_pct or 0.0) - 0.50) / 0.22) * horizon_conf
+        minimap_score, minimap_debug = _estimate_minimap_elevation_signal(
+            rois.get("minimap")
+        )
+        telemetry_score, telemetry_debug = _telemetry_low_ground_score(telemetry)
+
+        signals = [
+            ("view_angle_edges", edge_score, 1.0),
+            ("horizon_pitch", horizon_score, 0.8),
+            ("minimap", minimap_score, 0.45),
+            ("telemetry", telemetry_score, 1.0),
+        ]
+        score = _combine_weighted_scores(signals)
+        evidence = [
+            name
+            for name, raw_score, weight in signals
+            if raw_score * weight >= 0.18
+        ]
         debug = {
-            "source": "estimator",
+            "source": "multi_signal_estimator",
             "valid": True,
             "top_edges": round(float(top_edges), 4),
             "bottom_edges": round(float(bottom_edges), 4),
             "edge_ratio": round(float(ratio), 4),
+            "edge_score": round(float(edge_score), 4),
+            "horizon_y_pct": None
+            if horizon_y_pct is None
+            else round(float(horizon_y_pct), 4),
+            "horizon_confidence": round(float(horizon_conf), 4),
+            "horizon": horizon_debug,
+            "minimap": minimap_debug,
+            "telemetry": telemetry_debug,
             "score": round(float(score), 4),
+            "evidence": evidence,
         }
         if score < 0.45:
             return None, score, debug
@@ -526,9 +564,166 @@ def _empty_bar_confidence(roi: "np.ndarray", mask: "np.ndarray") -> float:
     return max(0.0, min(0.45, 0.18 + darkness * 0.27))
 
 
+def _estimate_horizon_y_pct(frame: "np.ndarray") -> tuple[float | None, float, dict[str, Any]]:
+    if cv2 is None or np is None or frame.size == 0:
+        return None, 0.0, {"valid": False}
+
+    h, w = frame.shape[:2]
+    y1 = int(h * 0.18)
+    y2 = int(h * 0.72)
+    x1 = int(w * 0.18)
+    x2 = int(w * 0.82)
+    region = frame[y1:y2, x1:x2]
+    if region.size == 0:
+        return None, 0.0, {"valid": False}
+
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 60, 150)
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=70,
+        minLineLength=max(40, region.shape[1] // 5),
+        maxLineGap=18,
+    )
+    if lines is None:
+        return None, 0.0, {"valid": True, "line_count": 0}
+
+    weighted_y: list[tuple[float, float]] = []
+    for raw_line in lines[:80]:
+        x_a, y_a, x_b, y_b = [float(v) for v in raw_line[0]]
+        dx = x_b - x_a
+        dy = y_b - y_a
+        length = (dx * dx + dy * dy) ** 0.5
+        if length <= 0.0:
+            continue
+        slope = abs(dy / max(1.0, abs(dx)))
+        if slope > 0.22:
+            continue
+        weighted_y.append(((y_a + y_b) / 2.0, length))
+
+    if not weighted_y:
+        return None, 0.0, {"valid": True, "line_count": int(len(lines)), "horizontal_count": 0}
+
+    weighted_y.sort(key=lambda item: item[0])
+    total_weight = sum(weight for _, weight in weighted_y)
+    midpoint = total_weight / 2.0
+    running = 0.0
+    median_y = weighted_y[0][0]
+    for y, weight in weighted_y:
+        running += weight
+        if running >= midpoint:
+            median_y = y
+            break
+
+    y_pct = (float(y1) + median_y) / float(h)
+    confidence = _clamp01(len(weighted_y) / 12.0)
+    return y_pct, confidence, {
+        "valid": True,
+        "line_count": int(len(lines)),
+        "horizontal_count": len(weighted_y),
+        "y_pct": round(float(y_pct), 4),
+        "confidence": round(float(confidence), 4),
+    }
+
+
+def _estimate_minimap_elevation_signal(roi: "np.ndarray" | None) -> tuple[float, dict[str, Any]]:
+    if cv2 is None or np is None or roi is None or roi.size == 0:
+        return 0.0, {"valid": False}
+
+    height, width = roi.shape[:2]
+    if height < 20 or width < 20:
+        return 0.0, {"valid": False}
+
+    focus = roi[int(height * 0.12) : int(height * 0.88), int(width * 0.12) : int(width * 0.88)]
+    if focus.size == 0:
+        return 0.0, {"valid": False}
+
+    gray = cv2.cvtColor(focus, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 70, 160)
+    top = edges[: edges.shape[0] // 2]
+    bottom = edges[edges.shape[0] // 2 :]
+    top_density = float((top > 0).mean()) if top.size else 0.0
+    bottom_density = float((bottom > 0).mean()) if bottom.size else 0.0
+    ratio = (top_density + 1e-6) / (bottom_density + 1e-6)
+    # Minimap elevation is map/style dependent, so keep this as a weak cue.
+    score = _clamp01((ratio - 1.25) / 1.5)
+    return score, {
+        "valid": True,
+        "top_edge_density": round(top_density, 4),
+        "bottom_edge_density": round(bottom_density, 4),
+        "edge_ratio": round(float(ratio), 4),
+        "score": round(float(score), 4),
+    }
+
+
+def _telemetry_low_ground_score(data: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    view_up = _as_opt_float(
+        _pick_first(data, "view_pitch_up_score", "camera_pitch_up_score")
+    )
+    if view_up is None:
+        pitch_deg = _as_raw_float(_pick_first(data, "view_pitch_deg", "camera_pitch_deg"))
+        if pitch_deg is not None:
+            view_up = _clamp01(pitch_deg / 35.0)
+
+    horizon = _as_opt_float(_pick_first(data, "horizon_y_pct", "horizon_ratio"))
+    horizon_score = _clamp01(((horizon or 0.0) - 0.50) / 0.22) if horizon is not None else 0.0
+
+    minimap = _as_opt_float(
+        _pick_first(
+            data,
+            "minimap_high_ground_confidence",
+            "minimap_elevation_confidence",
+        )
+    )
+    active = _as_opt_bool(
+        _pick_first(
+            data,
+            "minimap_high_ground_disadvantage",
+            "minimap_low_ground",
+        )
+    )
+    if active is False:
+        minimap = 0.0
+    elif active is True and minimap is None:
+        minimap = 0.7
+
+    score = max(view_up or 0.0, horizon_score, minimap or 0.0)
+    return score, {
+        "view_up_score": None if view_up is None else round(float(view_up), 4),
+        "horizon_score": round(float(horizon_score), 4),
+        "minimap_score": None if minimap is None else round(float(minimap), 4),
+        "score": round(float(score), 4),
+    }
+
+
+def _combine_weighted_scores(signals: list[tuple[str, float, float]]) -> float:
+    remaining = 1.0
+    for _name, score, weight in signals:
+        remaining *= 1.0 - _clamp01(score) * max(0.0, min(1.0, float(weight)))
+    return _clamp01(1.0 - remaining)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 def _as_opt_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return min(1.0, max(0.0, float(value)))
+    return None
+
+
+def _as_raw_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
     return None
 
 

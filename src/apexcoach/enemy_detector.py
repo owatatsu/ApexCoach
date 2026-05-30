@@ -94,6 +94,7 @@ class YoloEnemyDetector:
         return _summarize_enemy_state(
             detections=detections,
             frame_width=int(frame.shape[1]),
+            frame_height=int(frame.shape[0]),
             history=self._track_history,
         )
 
@@ -239,6 +240,7 @@ def _summarize_enemy_state(
     *,
     detections: list[EnemyDetection],
     frame_width: int,
+    frame_height: int,
     history: dict[int, deque[_TrackPoint]],
 ) -> EnemyState:
     enemy_left = 0
@@ -272,6 +274,8 @@ def _summarize_enemy_state(
     return EnemyState(
         available=True,
         detections=detections,
+        frame_width=frame_width,
+        frame_height=frame_height,
         enemy_count=len(detections),
         enemy_left=enemy_left,
         enemy_center=enemy_center,

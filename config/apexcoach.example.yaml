@@ -166,6 +166,7 @@ rois:
   shield_bar: [160, 982, 270, 22]
   teammate_panel: [20, 735, 430, 200]
   kill_feed: [1490, 120, 390, 220]
+  minimap: [28, 28, 260, 260]
 
 # ROI calibration
 scale_rois_to_frame: true

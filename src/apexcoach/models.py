@@ -38,6 +38,7 @@ class ParsedStatus:
 class ParsedTactical:
     low_ground_disadvantage: bool | None = None
     low_ground_confidence: float = 0.0
+    low_ground_evidence: list[str] = field(default_factory=list)
     exposed_no_cover: bool | None = None
     exposed_confidence: float = 0.0
     is_moving: bool | None = None
@@ -74,6 +75,8 @@ class EnemyDetection:
 class EnemyState:
     available: bool = False
     detections: list[EnemyDetection] = field(default_factory=list)
+    frame_width: int = 0
+    frame_height: int = 0
     enemy_count: int = 0
     enemy_left: int = 0
     enemy_center: int = 0
@@ -104,6 +107,7 @@ class GameState:
     ally_knock_recent: bool = False
     low_ground_disadvantage: bool = False
     low_ground_confidence: float = 0.0
+    low_ground_evidence: list[str] = field(default_factory=list)
     exposed_no_cover: bool = False
     exposed_confidence: float = 0.0
     enemy_available: bool = False

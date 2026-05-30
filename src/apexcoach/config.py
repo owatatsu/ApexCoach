@@ -216,6 +216,7 @@ def default_rois() -> dict[str, Roi]:
         "shield_bar": Roi(42, 982, 420, 22),
         "teammate_panel": Roi(20, 735, 430, 220),
         "kill_feed": Roi(1490, 120, 390, 220),
+        "minimap": Roi(28, 28, 260, 260),
     }
 
 

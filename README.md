@@ -179,6 +179,7 @@ apexcoach ^
 - Press `c` or Esc to skip a ROI and keep the existing configured box if one exists
 - The output YAML contains `rois`, `roi_reference_width`, and `roi_reference_height`
 - Copy or merge the generated values into your active config
+- Include `minimap` when calibrating if you want high-ground estimation to use map-side cues
 
 Detection debug dump (to inspect bar masks and parser confidence):
 
@@ -225,7 +226,22 @@ Notes:
 - Install the optional dependency with `pip install -e .[yolo]`
 - If YOLO fails to load or inference raises, ApexCoach logs a warning and continues
 - When enabled, LLM payloads include enemy summary lines such as `enemy_count=2`
+- Enemy vertical position is used as a supporting high-ground cue when enemies appear high in frame
 - `yolo.debug_draw: true` overlays boxes and `track_id` labels for debugging
+
+## High-Ground Estimation
+
+`TAKE_HIGH_GROUND` is driven by `low_ground_disadvantage`, which blends several
+supporting signals instead of relying on one screen-edge heuristic:
+
+- view-angle / upper-screen edge density
+- estimated horizon line position
+- optional minimap ROI edge imbalance
+- YOLO enemy vertical position when enemy detection is enabled
+- optional telemetry fields such as `view_pitch_up_score`, `horizon_y_pct`, and `minimap_high_ground_confidence`
+
+The evidence is logged as `state.low_ground_evidence` and included in LLM
+payloads so reviews can explain why the high-ground cue appeared.
 
 ## Tests
 

@@ -69,6 +69,7 @@ class StateAggregator:
         self._allies_down = 0
         self._low_ground_disadvantage = False
         self._low_ground_confidence = 0.0
+        self._low_ground_evidence: list[str] = []
         self._exposed_no_cover = False
         self._exposed_confidence = 0.0
         self._under_fire = False
@@ -112,17 +113,28 @@ class StateAggregator:
         if status.allies_down is not None:
             self._allies_down = status.allies_down
         if tactical is not None:
-            self._low_ground_confidence = _smoothed_confidence(
+            visual_low_ground_confidence = _smoothed_confidence(
                 current=self._low_ground_confidence,
                 detected=tactical.low_ground_disadvantage,
                 score=tactical.low_ground_confidence,
                 alpha=self.tactical_ema_alpha,
+            )
+            enemy_low_ground_confidence, enemy_evidence = _enemy_high_ground_score(
+                enemy_state
+            )
+            self._low_ground_confidence = _combine_low_ground_confidence(
+                visual_low_ground_confidence,
+                enemy_low_ground_confidence,
             )
             self._low_ground_disadvantage = _apply_hysteresis(
                 current=self._low_ground_disadvantage,
                 score=self._low_ground_confidence,
                 on_threshold=self.low_ground_confidence_min,
                 off_threshold=self.low_ground_confidence_off,
+            )
+            self._low_ground_evidence = _merge_evidence(
+                tactical.low_ground_evidence,
+                enemy_evidence,
             )
 
             self._exposed_confidence = _smoothed_confidence(
@@ -198,6 +210,7 @@ class StateAggregator:
             ally_knock_recent=self._has_recent(self._ally_knocks, timestamp),
             low_ground_disadvantage=self._low_ground_disadvantage,
             low_ground_confidence=self._low_ground_confidence,
+            low_ground_evidence=list(self._low_ground_evidence),
             exposed_no_cover=self._exposed_no_cover,
             exposed_confidence=self._exposed_confidence,
             enemy_available=self._enemy_state.available,
@@ -299,3 +312,49 @@ def _apply_hysteresis(
     if current:
         return value >= float(off_threshold)
     return value >= float(on_threshold)
+
+
+def _enemy_high_ground_score(enemy_state: EnemyState | None) -> tuple[float, list[str]]:
+    if enemy_state is None or not enemy_state.available or not enemy_state.detections:
+        return 0.0, []
+    frame_h = int(enemy_state.frame_height)
+    if frame_h <= 0:
+        return 0.0, []
+
+    scores: list[float] = []
+    for detection in enemy_state.detections:
+        center_y = ((detection.y1 + detection.y2) / 2.0) / float(frame_h)
+        # Enemies materially above the crosshair area suggest we are looking up
+        # or fighting into high ground. Keep this as a supporting cue.
+        vertical_score = max(0.0, min(1.0, (0.48 - center_y) / 0.28))
+        if vertical_score <= 0.0:
+            continue
+        scores.append(vertical_score * max(0.0, min(1.0, detection.confidence)))
+
+    if not scores:
+        return 0.0, []
+    score = max(scores)
+    if score < 0.18:
+        return score, []
+    return score, [f"enemy_high_in_frame:{score:.2f}"]
+
+
+def _combine_low_ground_confidence(visual_score: float, enemy_score: float) -> float:
+    visual = max(0.0, min(1.0, float(visual_score)))
+    enemy = max(0.0, min(1.0, float(enemy_score)))
+    # Enemy vertical position is useful but noisy, so cap its direct influence.
+    enemy = min(0.75, enemy)
+    return max(visual, 1.0 - ((1.0 - visual) * (1.0 - enemy)))
+
+
+def _merge_evidence(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+    return out

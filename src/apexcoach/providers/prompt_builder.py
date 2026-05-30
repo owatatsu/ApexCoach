@@ -41,6 +41,7 @@ def build_user_payload(
             "ally_knock_recent": state.ally_knock_recent,
             "low_ground_disadvantage": state.low_ground_disadvantage,
             "low_ground_confidence": round(state.low_ground_confidence, 3),
+            "low_ground_evidence": list(state.low_ground_evidence),
             "exposed_no_cover": state.exposed_no_cover,
             "exposed_confidence": round(state.exposed_confidence, 3),
             "is_moving": state.is_moving,

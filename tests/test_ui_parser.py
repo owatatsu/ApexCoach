@@ -1,6 +1,14 @@
+import json
+
 import numpy as np
 
-from apexcoach.ui_parser import _estimate_color_bar_ratio, _left_fill_ratio
+from apexcoach.models import FramePacket
+from apexcoach.ui_parser import (
+    SimpleUiParser,
+    TelemetryReader,
+    _estimate_color_bar_ratio,
+    _left_fill_ratio,
+)
 
 
 def _make_bar_roi(
@@ -59,3 +67,30 @@ def test_estimate_shield_ratio_for_empty_bar_with_outline() -> None:
     assert ratio is not None
     assert ratio <= 0.05
     assert confidence >= 0.2
+
+
+def test_parse_tactical_uses_view_pitch_telemetry_for_low_ground(tmp_path) -> None:
+    telemetry_path = tmp_path / "telemetry.jsonl"
+    telemetry_path.write_text(
+        json.dumps(
+            {
+                "frame_index": 0,
+                "view_pitch_up_score": 0.8,
+                "horizon_y_pct": 0.62,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parser = SimpleUiParser(telemetry=TelemetryReader(telemetry_path))
+    packet = FramePacket(
+        frame_index=0,
+        timestamp=0.0,
+        frame=np.zeros((120, 200, 3), dtype=np.uint8),
+    )
+
+    tactical = parser.parse_tactical(packet, rois={})
+
+    assert tactical.low_ground_disadvantage is True
+    assert tactical.low_ground_confidence >= 0.8
+    assert "telemetry" in tactical.low_ground_evidence

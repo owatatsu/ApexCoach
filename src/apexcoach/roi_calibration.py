@@ -14,7 +14,13 @@ except ImportError:  # pragma: no cover - runtime dependency
     cv2 = None
 
 
-DEFAULT_CALIBRATION_ROIS = ("hp_bar", "shield_bar", "teammate_panel", "kill_feed")
+DEFAULT_CALIBRATION_ROIS = (
+    "hp_bar",
+    "shield_bar",
+    "teammate_panel",
+    "kill_feed",
+    "minimap",
+)
 
 
 @dataclass(slots=True)

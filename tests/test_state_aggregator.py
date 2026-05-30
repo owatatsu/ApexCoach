@@ -1,4 +1,4 @@
-from apexcoach.models import FrameEvents, ParsedStatus, ParsedTactical
+from apexcoach.models import EnemyDetection, EnemyState, FrameEvents, ParsedStatus, ParsedTactical
 from apexcoach.state_aggregator import StateAggregator
 
 
@@ -112,3 +112,43 @@ def test_vitals_are_smoothed_before_low_hp_logic() -> None:
     assert state.hp_pct > 0.1
     assert state.shield_pct > 0.1
     assert state.heal_low_hp_streak == 0
+
+
+def test_enemy_high_in_frame_boosts_low_ground_evidence() -> None:
+    agg = StateAggregator(
+        low_ground_confidence_min=0.55,
+        tactical_ema_alpha=0.5,
+    )
+    status = ParsedStatus(
+        hp_pct=1.0,
+        shield_pct=1.0,
+        hp_confidence=1.0,
+        shield_confidence=1.0,
+    )
+    enemy_state = EnemyState(
+        available=True,
+        frame_width=1920,
+        frame_height=1080,
+        detections=[
+            EnemyDetection(
+                x1=900,
+                y1=120,
+                x2=980,
+                y2=260,
+                confidence=0.9,
+                class_id=0,
+                class_name="person",
+            )
+        ],
+    )
+
+    state = agg.update(
+        status=status,
+        events=FrameEvents(timestamp=0.0),
+        tactical=ParsedTactical(),
+        enemy_state=enemy_state,
+    )
+
+    assert state.low_ground_confidence >= 0.55
+    assert state.low_ground_disadvantage is True
+    assert any(item.startswith("enemy_high_in_frame") for item in state.low_ground_evidence)
