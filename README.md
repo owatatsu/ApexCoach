@@ -192,9 +192,37 @@ Spoken advice:
 
 - Install `pyttsx3` support with `pip install -e .[voice]`
 - Set `voice.enabled: true` for queued non-blocking speech output
-- `voice.include_reason: false` keeps callouts to short action labels
-- `voice.min_interval_seconds` and `voice.same_text_cooldown_seconds` limit repeated audio
+- `voice.startup_timeout_seconds` bounds startup health-check waiting; a failed
+  or timed-out TTS startup disables voice without stopping screen analysis
+- `voice.realtime_short_mode: true` uses short callouts such as `退避`, `遮蔽へ`, and `今、回復`
+- `voice.include_reason: false` keeps callouts to action-only text (the CLI equivalent is `--voice-action-only`)
+- Voice messages are prioritized `RETREAT > TAKE_COVER > HEAL > TAKE_HIGH_GROUND > PUSH`.
+  A new high-priority message can overtake queued lower-priority advice.
+- `voice.normal_message_ttl_seconds` and `voice.emergency_message_ttl_seconds`
+  discard stale advice before it is spoken.
+- `voice.emergency_interval_bypass: true` lets a new emergency callout bypass
+  the normal minimum interval. Only `RETREAT`, `TAKE_COVER`, and critical
+  `HEAL` are emergency messages; normal `HEAL` keeps the normal interval and TTL.
+  Same-action cooldowns still prevent repetition.
+- `voice.max_queue_size` bounds pending speech. When full, the least important
+  oldest message is dropped first.
+- Voice startup validates the backend, `pyttsx3`, engine initialization, and an
+  explicitly configured voice ID. Failure disables voice with a warning while
+  screen analysis continues.
 - CLI overrides: `--voice-enable`, `--voice-rate 210`, `--voice-action-only`
+
+Realtime rule decisions for `RETREAT`, `TAKE_COVER`, and critical `HEAL` are
+enqueued before any realtime LLM work. These emergency decisions are not
+overwritten by an LLM response. Non-emergency LLM advice is requested in a
+background worker and applied only when it completes without creating a
+same-frame rule/LLM double callout. Voice lifecycle events (`enqueued`,
+`started`, `completed`, `failed`, and `dropped`) are stored as additional
+`record_type: voice_event` JSONL records and are included in the session report.
+Realtime LLM results carry a request generation and are discarded after an
+emergency, shutdown, state/action mismatch, or the configured age limit
+(`llm.advice_result_max_age_seconds`).
+The local enqueue path is designed for the sub-150 ms target; speech start is
+backend-dependent, with approximately 400 ms as the operational target.
 
 Recommended local models:
 

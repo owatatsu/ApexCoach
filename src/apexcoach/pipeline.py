@@ -15,7 +15,7 @@ from apexcoach.detection_debug import DetectionDebugDumper
 from apexcoach.display_text import format_instruction_line, localize_reason
 from apexcoach.enemy_detector import YoloEnemyDetector, draw_enemy_debug
 from apexcoach.event_detector import EventDetector
-from apexcoach.llm_advisor import LlmAdvisor
+from apexcoach.llm_advisor import AsyncAdviceResult, LlmAdvisor
 from apexcoach.models import (
     Action,
     ArbiterResult,
@@ -133,12 +133,15 @@ class _PipelineSession:
         self.decision_engine = RuleDecisionEngine(self.config.thresholds)
         self.arbiter = ActionArbiter(self.config.arbiter)
         self.overlay = OverlayRenderer(self.config.overlay)
-        self.voice = VoiceAdvisor(self.config.voice)
-        self.llm = LlmAdvisor(self.config.llm)
         self.logger = SessionLogger(
             path=self.config.logging.path,
             enabled=self.config.logging.enabled,
         )
+        self.voice = VoiceAdvisor(
+            self.config.voice,
+            event_sink=self.logger.log_voice_event,
+        )
+        self.llm = LlmAdvisor(self.config.llm)
         self.debug_dumper = DetectionDebugDumper(self.config.detection_debug)
 
         self.ui_gate = RateGate(self.config.frequencies.ui_parse_fps)
@@ -279,6 +282,9 @@ class _PipelineSession:
             self.writer = None
         self.overlay.close()
         self.voice.close()
+        close_llm = getattr(self.llm, "close", None)
+        if callable(close_llm):
+            close_llm()
         self.logger.close()
         self.debug_dumper.close()
 
@@ -286,24 +292,109 @@ class _PipelineSession:
         runtime = self.runtime
         candidates = self.decision_engine.decide_candidates(state)
         rule_decision = _select_rule_decision(candidates)
-        advised_decision, llm_reason = self.llm.maybe_advise_decision(
-            state=state,
-            candidates=candidates,
-            rule_decision=rule_decision,
-            timestamp=timestamp,
-            run_now=self.llm_gate.ready(timestamp),
+        emergency_rule = _is_emergency_rule_decision(
+            state,
+            rule_decision,
+            self.config,
         )
-        runtime.decision = advised_decision or rule_decision
         runtime.display_lines = _format_display_lines(
             candidates,
             max_lines=self.config.overlay.max_lines,
         )
-        runtime.arbiter_result = self.arbiter.arbitrate(runtime.decision, timestamp)
-        self.voice.maybe_speak(
-            decision=runtime.decision,
-            arbiter=runtime.arbiter_result,
+
+        # Establish and enqueue emergency rule advice before any LLM work. This
+        # keeps RETREAT/COVER/critical HEAL independent of network or model lag.
+        rule_arbiter = self.arbiter.arbitrate(rule_decision, timestamp)
+        runtime.decision = rule_decision
+        runtime.arbiter_result = rule_arbiter
+        rule_audio_emitted = self.voice.maybe_speak(
+            decision=rule_decision,
+            arbiter=rule_arbiter,
             timestamp=timestamp,
-        )
+            urgent=emergency_rule,
+        ) is not None
+        if emergency_rule:
+            # A pending non-emergency result must not overwrite an emergency
+            # decision when it eventually completes.
+            invalidate_advice = getattr(self.llm, "invalidate_pending_advice", None)
+            if callable(invalidate_advice):
+                invalidate_advice()
+            poll_advice = getattr(self.llm, "poll_advice", None)
+            if callable(poll_advice):
+                poll_advice()
+            _record_action_transition(
+                state_aggregator=self.state_aggregator,
+                state=state,
+                action=runtime.arbiter_result.action,
+                timestamp=timestamp,
+            )
+            runtime.action_counts[runtime.arbiter_result.action.value] += 1
+            return "llm_skip:urgent_rule"
+
+        llm_reason: str | None = None
+        poll_advice = getattr(self.llm, "poll_advice", None)
+        request_advice_async = getattr(self.llm, "request_advice_async", None)
+        if callable(poll_advice) and callable(request_advice_async):
+            pending = poll_advice()
+            if pending is not None:
+                llm_reason = pending.reason
+                if _is_current_async_advice(
+                    pending,
+                    candidates=candidates,
+                    rule_decision=rule_decision,
+                    timestamp=timestamp,
+                    max_age_seconds=self.config.llm.advice_result_max_age_seconds,
+                ):
+                    advised_decision = pending.decision
+                else:
+                    advised_decision = None
+                    llm_reason = "llm_skip:stale_result"
+                # The rule audio only suppresses a second callout. The LLM
+                # decision still applies to the frame, including Action.NONE.
+                if advised_decision is not None:
+                    runtime.decision = advised_decision
+                    runtime.arbiter_result = self.arbiter.arbitrate(
+                        advised_decision,
+                        timestamp,
+                    )
+                    if not rule_audio_emitted:
+                        self.voice.maybe_speak(
+                            decision=advised_decision,
+                            arbiter=runtime.arbiter_result,
+                            timestamp=timestamp,
+                            urgent=False,
+                        )
+            request_advice_async(
+                state=state,
+                candidates=candidates,
+                rule_decision=rule_decision,
+                timestamp=timestamp,
+                run_now=self.llm_gate.ready(timestamp),
+            )
+        else:
+            # Compatibility path for small test doubles and third-party LLM
+            # adapters that only implement the original synchronous method.
+            advised_decision, llm_reason = self.llm.maybe_advise_decision(
+                state=state,
+                candidates=candidates,
+                rule_decision=rule_decision,
+                timestamp=timestamp,
+                run_now=self.llm_gate.ready(timestamp),
+            )
+            if advised_decision is not None:
+                runtime.decision = advised_decision
+                runtime.arbiter_result = self.arbiter.arbitrate(
+                    advised_decision,
+                    timestamp,
+                )
+                if not rule_audio_emitted:
+                    self.voice.maybe_speak(
+                        decision=advised_decision,
+                        arbiter=runtime.arbiter_result,
+                        timestamp=timestamp,
+                        urgent=False,
+                    )
+
         _record_action_transition(
             state_aggregator=self.state_aggregator,
             state=state,
@@ -421,6 +512,45 @@ def _select_rule_decision(candidates: list[Decision]) -> Decision:
     )
 
 
+def _is_emergency_rule_decision(
+    state: GameState,
+    decision: Decision,
+    config: ApexCoachConfig,
+) -> bool:
+    if decision.action in {Action.RETREAT, Action.TAKE_COVER}:
+        return True
+    if decision.action != Action.HEAL:
+        return False
+    if "Critical" in decision.reason or "critical" in decision.reason:
+        return True
+    return (
+        state.hp_pct + state.shield_pct
+        <= float(config.thresholds.critical_heal_total_hp_shield)
+    )
+
+
+def _is_current_async_advice(
+    result: AsyncAdviceResult,
+    *,
+    candidates: list[Decision],
+    rule_decision: Decision,
+    timestamp: float,
+    max_age_seconds: float,
+) -> bool:
+    age = float(timestamp) - float(result.requested_timestamp)
+    if age < -0.5 or age > max(0.0, float(max_age_seconds)):
+        return False
+    if result.requested_rule_action != rule_decision.action:
+        return False
+    if result.decision is None:
+        return True
+    # Action.NONE is an explicit LLM decision, not an absent result.  The
+    # advisor adds it to the candidate set so the LLM can veto a rule action.
+    allowed_actions = {Action.NONE, rule_decision.action}
+    allowed_actions.update(candidate.action for candidate in candidates)
+    return result.decision.action in allowed_actions
+
+
 def _record_action_transition(
     state_aggregator: StateAggregator,
     state: GameState,
@@ -491,6 +621,7 @@ def _to_overlay_llm_message(raw_reason: str | None) -> str | None:
     internal_prefixes = (
         "llm_skip:",
         "llm_none",
+        "llm_async_error:",
         "provider_disabled",
         "network_error",
         "timeout",

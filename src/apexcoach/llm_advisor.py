@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Any
 from urllib import error, request
 
@@ -11,6 +13,16 @@ from apexcoach.providers.factory import build_provider
 from apexcoach.providers.types import LLMProviderConfig
 
 
+@dataclass(frozen=True, slots=True)
+class AsyncAdviceResult:
+    request_id: int
+    generation: int
+    requested_timestamp: float
+    requested_rule_action: Action
+    decision: Decision | None
+    reason: str | None
+
+
 class LlmAdvisor:
     """Optional low-frequency LLM helper for explanations and post-game review."""
 
@@ -18,6 +30,14 @@ class LlmAdvisor:
         self.config = config
         self._last_advice_request_ts: float | None = None
         self._advice_in_flight = False
+        self._async_lock = Lock()
+        self._async_thread: Thread | None = None
+        self._async_done = False
+        self._async_result: AsyncAdviceResult | None = None
+        self._async_generation = 0
+        self._next_request_id = 0
+        self._active_request_id: int | None = None
+        self._closed = False
         self._advice_providers = []
         if self.config.enabled and self.config.advice_enabled:
             for model_name in self._resolve_advice_model_candidates():
@@ -41,6 +61,104 @@ class LlmAdvisor:
                     )
                 except ValueError:
                     continue
+
+    def request_advice_async(
+        self,
+        *,
+        state: GameState,
+        candidates: list[Decision],
+        rule_decision: Decision,
+        timestamp: float,
+        run_now: bool,
+    ) -> bool:
+        """Start a realtime advice request without blocking frame processing."""
+        if not run_now:
+            return False
+        with self._async_lock:
+            if (
+                self._closed
+                or not self.config.enabled
+                or not self.config.advice_enabled
+                or not self._advice_providers
+            ):
+                return False
+            if self._async_thread is not None and self._async_thread.is_alive():
+                return False
+            if self._async_done:
+                return False
+            self._next_request_id += 1
+            request_id = self._next_request_id
+            generation = self._async_generation
+            self._active_request_id = request_id
+            self._async_done = False
+            self._async_result = None
+
+            def worker() -> None:
+                try:
+                    result = self.maybe_advise_decision(
+                        state=state,
+                        candidates=candidates,
+                        rule_decision=rule_decision,
+                        timestamp=timestamp,
+                        run_now=True,
+                    )
+                except Exception as exc:  # pragma: no cover - provider safety
+                    result = (None, f"llm_async_error:{exc}")
+                with self._async_lock:
+                    if (
+                        self._closed
+                        or generation != self._async_generation
+                        or request_id != self._active_request_id
+                    ):
+                        return
+                    decision, reason = result
+                    self._async_result = AsyncAdviceResult(
+                        request_id=request_id,
+                        generation=generation,
+                        requested_timestamp=float(timestamp),
+                        requested_rule_action=rule_decision.action,
+                        decision=decision,
+                        reason=reason,
+                    )
+                    self._async_done = True
+
+            self._async_thread = Thread(
+                target=worker,
+                name="apexcoach-llm-advisor",
+                daemon=True,
+            )
+            self._async_thread.start()
+            return True
+
+    def poll_advice(self) -> AsyncAdviceResult | None:
+        with self._async_lock:
+            if not self._async_done:
+                return None
+            result = self._async_result
+            self._async_done = False
+            self._async_result = None
+            self._active_request_id = None
+            return result
+
+    def invalidate_pending_advice(self) -> None:
+        """Invalidate running and completed realtime advice without blocking."""
+        with self._async_lock:
+            self._async_generation += 1
+            self._async_done = False
+            self._async_result = None
+            self._active_request_id = None
+
+    def close(self) -> None:
+        with self._async_lock:
+            self._closed = True
+            self._async_generation += 1
+            self._async_done = False
+            self._async_result = None
+            self._active_request_id = None
+            thread = self._async_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
+        self._async_thread = None
 
     def maybe_explain(
         self,
@@ -569,6 +687,14 @@ def _build_review_payload(
             try:
                 record = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+
+            # Session JSONL may contain lifecycle records that are not frames.
+            # Keep record_type-less legacy records as frames, but never let a
+            # voice event (or a future typed non-frame record) affect timing or
+            # ratios in the offline review payload.
+            record_type = record.get("record_type")
+            if record_type and record_type not in {"frame", "session_frame"}:
                 continue
 
             total_frames += 1

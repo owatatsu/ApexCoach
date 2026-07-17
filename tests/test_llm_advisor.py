@@ -1,8 +1,11 @@
 import json
+import time
+from threading import Event
 from urllib import error
 
 from apexcoach.config import LlmConfig
 from apexcoach.llm_advisor import (
+    AsyncAdviceResult,
     LlmAdvisor,
     _build_advice_context,
     _build_review_payload,
@@ -124,6 +127,210 @@ def test_build_review_payload_downsamples_timeline_across_full_session(tmp_path)
     assert len(timeline) == 4
     assert timeline[0]["t"] == 0.0
     assert timeline[-1]["t"] == 70.0
+
+
+def test_build_review_payload_excludes_voice_events_from_frame_statistics(tmp_path) -> None:
+    log_path = tmp_path / "session.jsonl"
+    records = [
+        {
+            "timestamp": 0.0,
+            "state": {"hp_pct": 0.9, "shield_pct": 0.8, "under_fire": True},
+            "decision": {"reason": "cover"},
+            "arbiter": {"action": "TAKE_COVER", "emitted": True},
+        },
+        {
+            "timestamp": 10.0,
+            "state": {"hp_pct": 0.2, "shield_pct": 0.2, "under_fire": False},
+            "decision": {"reason": "heal"},
+            "arbiter": {"action": "HEAL", "emitted": True},
+        },
+        {
+            "record_type": "voice_event",
+            "event": "completed",
+            "action": "HEAL",
+            "text": "今、回復",
+        },
+    ]
+    log_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = _build_review_payload(
+        log_path,
+        max_events=16,
+        reason_max_chars=96,
+        summary={"frames": 2},
+    )
+
+    assert payload is not None
+    assert payload["meta"]["frames"] == 2
+    assert payload["meta"]["duration_sec"] == 10.0
+    assert payload["ratios"]["under_fire_ratio"] == 0.5
+    assert payload["ratios"]["low_resource_ratio"] == 0.5
+    assert len(payload["timeline"]) == 2
+
+
+def test_async_advice_is_not_published_after_invalidation() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, provider="mock"))
+    started = Event()
+    release = Event()
+
+    def slow_advice(**kwargs):
+        started.set()
+        release.wait(timeout=1.0)
+        return Decision(Action.PUSH, "old push"), "old result"
+
+    advisor.maybe_advise_decision = slow_advice
+    assert advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert started.wait(timeout=1.0)
+    advisor.invalidate_pending_advice()
+    release.set()
+    time.sleep(0.05)
+    assert advisor.poll_advice() is None
+    advisor.close()
+
+
+def test_async_advice_completed_after_close_is_not_published() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, provider="mock"))
+    started = Event()
+    release = Event()
+
+    def slow_advice(**kwargs):
+        started.set()
+        release.wait(timeout=1.0)
+        return Decision(Action.PUSH, "old push"), "old result"
+
+    advisor.maybe_advise_decision = slow_advice
+    assert advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert started.wait(timeout=1.0)
+    advisor.close()
+    release.set()
+    time.sleep(0.05)
+    assert advisor.poll_advice() is None
+
+
+def test_async_request_is_not_started_when_llm_is_disabled() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=False))
+
+    assert not advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert advisor._async_thread is None
+    assert advisor._next_request_id == 0
+    assert advisor._async_generation == 0
+
+
+def test_async_request_is_not_started_when_advice_is_disabled() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, advice_enabled=False))
+
+    assert not advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert advisor._async_thread is None
+    assert advisor._next_request_id == 0
+    assert advisor._async_generation == 0
+
+
+def test_rejected_async_request_preserves_completed_result() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, advice_enabled=False))
+    completed = AsyncAdviceResult(
+        request_id=7,
+        generation=2,
+        requested_timestamp=1.0,
+        requested_rule_action=Action.PUSH,
+        decision=Decision(Action.NONE, "hold"),
+        reason="completed",
+    )
+    advisor._async_done = True
+    advisor._async_result = completed
+    advisor._next_request_id = 7
+    advisor._async_generation = 2
+
+    assert not advisor.request_advice_async(
+        state=GameState(timestamp=2.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=2.0,
+        run_now=True,
+    )
+    assert advisor.poll_advice() == completed
+    assert advisor._next_request_id == 7
+    assert advisor._async_generation == 2
+
+
+def test_async_request_is_not_started_without_advice_provider() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, provider="unsupported"))
+
+    assert not advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert advisor._async_thread is None
+    assert advisor._next_request_id == 0
+    assert advisor._async_generation == 0
+
+
+def test_async_request_is_not_started_after_close() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, provider="mock"))
+    advisor.close()
+
+    assert not advisor.request_advice_async(
+        state=GameState(timestamp=1.0),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    assert advisor._async_thread is None
+    assert advisor._next_request_id == 0
+    assert advisor._async_generation == 1
+
+
+def test_async_request_starts_with_mock_provider() -> None:
+    advisor = LlmAdvisor(LlmConfig(enabled=True, provider="mock"))
+
+    assert advisor.request_advice_async(
+        state=GameState(timestamp=1.0, recent_damage_1s=0.2),
+        candidates=[Decision(Action.PUSH, "push")],
+        rule_decision=Decision(Action.PUSH, "push"),
+        timestamp=1.0,
+        run_now=True,
+    )
+    for _ in range(100):
+        result = advisor.poll_advice()
+        if result is not None:
+            break
+        time.sleep(0.005)
+    else:
+        result = None
+    advisor.close()
+
+    assert result is not None
+    assert result.request_id == 1
 
 
 def test_generate_offline_review_writes_fallback_when_ollama_unavailable(

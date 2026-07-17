@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from apexcoach.models import Action, ArbiterResult, Decision, FrameEvents, FramePacket, GameState
@@ -13,15 +14,18 @@ class SessionLogger:
         self.enabled = enabled
         self.path = Path(path)
         self._handle = None
+        self._lock = Lock()
 
         if self.enabled:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._handle = self.path.open("w", encoding="utf-8")
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
+        with self._lock:
+            if self._handle is not None:
+                self._handle.flush()
+                self._handle.close()
+                self._handle = None
 
     def log_frame(
         self,
@@ -32,9 +36,6 @@ class SessionLogger:
         arbiter: ArbiterResult,
         llm_reason: str | None = None,
     ) -> None:
-        if self._handle is None:
-            return
-
         record = {
             "timestamp": packet.timestamp,
             "frame_index": packet.frame_index,
@@ -44,7 +45,17 @@ class SessionLogger:
             "arbiter": _serialize(arbiter),
             "llm_reason": llm_reason,
         }
-        self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._write(record)
+
+    def log_voice_event(self, event: dict[str, Any]) -> None:
+        """Append a structured voice event without disturbing frame records."""
+        self._write({"record_type": "voice_event", **event})
+
+    def _write(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            if self._handle is None:
+                return
+            self._handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _serialize(value: Any) -> Any:

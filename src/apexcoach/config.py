@@ -104,12 +104,17 @@ class VoiceConfig:
     enabled: bool = False
     backend: str = "pyttsx3"
     voice_id: str = ""
+    startup_timeout_seconds: float = 2.0
     rate: int = 190
     volume: float = 1.0
     include_reason: bool = True
     min_interval_seconds: float = 2.0
     same_text_cooldown_seconds: float = 6.0
-    max_queue_size: int = 2
+    normal_message_ttl_seconds: float = 2.5
+    emergency_message_ttl_seconds: float = 1.5
+    emergency_interval_bypass: bool = True
+    realtime_short_mode: bool = True
+    max_queue_size: int = 4
 
 
 @dataclass(slots=True)
@@ -176,6 +181,7 @@ class LlmConfig:
     api_key: str = "lm-studio"
     timeout_seconds: float = 45.0  # offline review path
     timeout_ms: int = 300  # realtime advisor path
+    advice_result_max_age_seconds: float = 2.0
     temperature: float = 0.1
     num_ctx: int = 4096
     lmstudio_response_format: str = "json_schema"

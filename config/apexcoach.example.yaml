@@ -73,12 +73,17 @@ voice:
   enabled: false
   backend: "pyttsx3"
   voice_id: ""
+  startup_timeout_seconds: 2.0
   rate: 190
   volume: 1.0
   include_reason: true
   min_interval_seconds: 2.0
   same_text_cooldown_seconds: 6.0
-  max_queue_size: 2
+  normal_message_ttl_seconds: 2.5
+  emergency_message_ttl_seconds: 1.5
+  emergency_interval_bypass: true
+  realtime_short_mode: true
+  max_queue_size: 4
 
 offline:
   input_video: ""
@@ -130,6 +135,7 @@ llm:
   offline_review_model_names: [] # optional: if empty, try loaded LM Studio models in order for offline review
   base_url: "http://127.0.0.1:1234/v1"
   timeout_ms: 1200
+  advice_result_max_age_seconds: 2.0
   temperature: 0.1
   llm_max_tokens: 64
   api_key: "lm-studio"

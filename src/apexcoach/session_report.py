@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,12 +35,30 @@ class SessionReportData:
     shield_samples: list[tuple[float, float]] = field(default_factory=list)
     confidence_samples: list[float] = field(default_factory=list)
     events: list[ReportEvent] = field(default_factory=list)
+    voice_success_count: int = 0
+    voice_dropped_count: int = 0
+    voice_failed_count: int = 0
+    voice_start_latencies_ms: list[float] = field(default_factory=list)
 
     @property
     def duration_sec(self) -> float:
         if self.first_ts is None or self.last_ts is None:
             return 0.0
         return max(0.0, self.last_ts - self.first_ts)
+
+    @property
+    def voice_average_start_latency_ms(self) -> float:
+        if not self.voice_start_latencies_ms:
+            return 0.0
+        return sum(self.voice_start_latencies_ms) / len(self.voice_start_latencies_ms)
+
+    @property
+    def voice_p95_start_latency_ms(self) -> float:
+        if not self.voice_start_latencies_ms:
+            return 0.0
+        values = sorted(self.voice_start_latencies_ms)
+        index = min(len(values) - 1, max(0, math.ceil(len(values) * 0.95) - 1))
+        return values[index]
 
 
 def build_session_report(log_path: str | Path) -> SessionReportData:
@@ -198,6 +217,9 @@ th {{ color: var(--muted); font-weight: 600; }}
     {_metric("Duration", f"{data.duration_sec:.1f}s")}
     {_metric("Under Fire", f"{under_fire_ratio:.1%}")}
     {_metric("Low Resources", f"{low_resource_ratio:.1%}")}
+    {_metric("Voice Success", str(data.voice_success_count))}
+    {_metric("Voice Dropped", str(data.voice_dropped_count))}
+    {_metric("Voice Start p95", f"{data.voice_p95_start_latency_ms:.1f} ms")}
   </div>
 
   <section>
@@ -231,6 +253,13 @@ th {{ color: var(--muted); font-weight: 600; }}
 
 
 def _add_record(data: SessionReportData, record: dict[str, Any]) -> None:
+    record_type = record.get("record_type")
+    if record_type == "voice_event":
+        _add_voice_event(data, record)
+        return
+    if record_type and record_type not in {"frame", "session_frame"}:
+        return
+
     ts = float(record.get("timestamp", 0.0) or 0.0)
     if data.first_ts is None:
         data.first_ts = ts
@@ -276,6 +305,21 @@ def _add_record(data: SessionReportData, record: dict[str, Any]) -> None:
                 allies_down=allies_down,
             )
         )
+
+
+def _add_voice_event(data: SessionReportData, record: dict[str, Any]) -> None:
+    event = str(record.get("event") or "")
+    if event == "completed":
+        data.voice_success_count += 1
+    elif event == "dropped":
+        data.voice_dropped_count += 1
+    elif event == "failed":
+        data.voice_failed_count += 1
+
+    if event == "started":
+        latency = _optional_float(record.get("latency_ms"))
+        if latency is not None:
+            data.voice_start_latencies_ms.append(latency)
 
 
 def _parse_record(line: str) -> dict[str, Any] | None:
